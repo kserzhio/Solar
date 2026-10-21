@@ -1,9 +1,10 @@
 import './styles.css';
 import { detectDevice } from './device';
 import { showStub } from './stub';
-import { nextFrame, removeBoot, setBoot } from './boot';
+import { localizePage, nextFrame, removeBoot, setBoot } from './boot';
 
 const root = document.getElementById('root')!;
+localizePage();
 const device = detectDevice();
 
 async function boot(): Promise<void> {

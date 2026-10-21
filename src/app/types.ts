@@ -2,7 +2,7 @@ import type * as THREE from 'three';
 import type { AudioEngine } from '../audio/AudioEngine';
 import type { Quality } from './Quality';
 
-export type SceneName = 'singularity' | 'bang' | 'plasma' | 'cosmos' | 'approach' | 'solar' | 'zoom' | 'nucleo' | 'supernova' | 'moon';
+export type SceneName = 'singularity' | 'bang' | 'plasma' | 'cosmos' | 'approach' | 'solar' | 'zoom' | 'nucleo' | 'supernova' | 'moon' | 'pulsar' | 'gargantua';
 
 export interface Pointer {
   /** Normalised device coordinates, -1..1. */

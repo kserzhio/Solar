@@ -2,17 +2,30 @@ import * as THREE from 'three';
 import { gsap } from 'gsap';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { config } from '../config';
-import { NOISE, POINT_FRAG, POINT_SIZE, additiveMaterial, colorUniform, gaussian, globalUniforms, mulberry32 } from '../shaders/common';
+import { globalUniforms } from '../shaders/common';
 import type { Ctx, SceneModule } from '../app/types';
-import { ASTEROID_BELT, DWARFS, KUIPER_BELT, OVERVIEW, PLANETS, SUN_RADIUS, planetAngle, type Planet } from '../data/planets';
-import { createMilkyWay, createStarfield, disposeObject, lerp } from './util';
+import { DWARFS, OVERVIEW, PLANETS, SUN_RADIUS, planetAngle, type Planet } from '../data/planets';
+import { createMilkyWay, createStarfield, disposeObject, lerp, smooth } from './util';
 import { Comet } from './Comet';
-import { SunNoiseCube, createSunStrands } from './sunFx';
+import { SunNoiseCube } from './sunFx';
 import { GalacticDrift } from './galacticDrift';
+import { createBrightStars } from './brightStars';
+import { buildCorona, buildLoops, buildSun } from './solar/sun';
+import { KIND_INDEX, type PlanetView } from './solar/common';
+import { buildPlanet } from './solar/planet';
+import { buildPlumes } from './solar/atmosphere';
+import { AsteroidRocks, buildBelt, buildKuiperBelt, buildRingChunks, buildSolarWind } from './solar/belts';
+import { PASSAGE_SPEED, Wormhole } from './wormhole';
 
-const KIND_INDEX = { rocky: 0, earth: 1, gas: 2, ice: 3 } as const;
 const ORBIT_OPACITY = { base: 0.13, hover: 0.42, focus: 0.3 };
 const OVERVIEW_LIMITS = { min: 9, max: 95 };
+/** Where the wormhole hangs, relative to Saturn (Solar-System units). */
+const WORMHOLE_OFFSET = new THREE.Vector3(3.6, 0.9, 3.3);
+/** Seconds of the flight up to the wormhole, and of the flight away from it on the way back. */
+const PORTAL_FLIGHT = 2.6;
+const PORTAL_BACK = 2.4;
+/** Where the flight in stops: distance from the wormhole's centre, in throat radii. */
+export const PORTAL_RC = 2.6;
 /** Seconds without input before the camera starts drifting around on its own. */
 const IDLE_AFTER = 7;
 /** Seconds without any input before the guided tour starts by itself. */
@@ -21,17 +34,16 @@ const TOUR_AFTER = 45;
 const TOUR_HOLD = 6.5;
 /** Size comparison: world units per Earth radius, and the Sun's true diameter. */
 const LINEUP_EARTH = 0.55;
+/** Relief strength for mapped rocky bodies (height per unit of map brightness, in radii). */
+const BUMP = 0.035;
 /** Colour maps per body (public/textures/planets). Pluto has none and stays procedural. */
 const PLANET_MAPS: Record<string, string> = {
   mercury: 'mercury.jpg', venus: 'venus.jpg', mars: 'mars.jpg', jupiter: 'jupiter.jpg', saturn: 'saturn.jpg',
   uranus: 'uranus.jpg', neptune: 'neptune.jpg', ceres: 'ceres.jpg', eris: 'eris.jpg',
 };
 const MOON_MAPS: Record<string, string> = { 'Місяць': 'moon.jpg' };
-/** How cratered each rocky body looks (0 = smooth). */
-const CRATERS: Record<string, number> = { mercury: 1, mars: 0.3, ceres: 0.8, pluto: 0.2, eris: 0.3 };
 const MOON_CRATERS: Record<string, number> = { 'Місяць': 1, 'Іо': 0, 'Європа': 0.12, 'Ганімед': 0.55, 'Каллісто': 1, 'Титан': 0 };
 /** Sunspots modelled on the Sun's surface (fixed array size for the shader). */
-const SUN_SPOTS = 12;
 const SUN_DIAMETER_KM = 1_392_700;
 /** Sun's galactic speed relative to Earth's orbital speed in the «Політ» animation (real: ~7.7). */
 const DRIFT_SPEED_RATIO = 1.6;
@@ -42,34 +54,7 @@ export interface CompareLabel {
   sub: string;
 }
 
-interface PlanetView {
-  data: Planet;
-  pivot: THREE.Object3D;
-  tilt: THREE.Object3D;
-  body: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
-  hit: THREE.Mesh;
-  orbit: THREE.Line<THREE.BufferGeometry, THREE.ShaderMaterial>;
-  highlight: number;
-  ring?: THREE.Mesh<THREE.RingGeometry, THREE.ShaderMaterial>;
-  faintRing?: THREE.Mesh<THREE.RingGeometry, THREE.ShaderMaterial>;
-  atmosphere?: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
-}
 
-const PLANET_VERT = /* glsl */ `
-  varying vec3 vObj;
-  varying vec3 vNormalW;
-  varying vec3 vPosW;
-  varying vec3 vSunObj;
-  void main() {
-    vObj = normalize(position);
-    vNormalW = normalize(mat3(modelMatrix) * normal);
-    vec4 w = modelMatrix * vec4(position, 1.0);
-    vPosW = w.xyz;
-    // Direction to the Sun (at the origin) in the body's own frame, for cloud shadows.
-    vSunObj = transpose(mat3(modelMatrix)) * -w.xyz;
-    gl_Position = projectionMatrix * viewMatrix * w;
-  }
-`;
 
 /**
  * Scene 5: the interactive Solar System. Orbits keep turning; hover shows a name,
@@ -86,6 +71,10 @@ export class Solar implements SceneModule {
 
   onHover: (planet: Planet | null) => void = () => {};
   onFocus: (planet: Planet | null) => void = () => {};
+  /** «Інтерстелар»: the pointer is on the wormhole near Saturn. */
+  onWormholeHover: (on: boolean) => void = () => {};
+  /** The camera has flown into the wormhole: the app takes over with the other side. */
+  onWormhole: () => void = () => {};
 
   hoveredIndex = -1;
   focusedIndex = -1;
@@ -101,6 +90,8 @@ export class Solar implements SceneModule {
   private loops = new THREE.Group();
   private loopIntensity = { value: 0 };
   private loopSunR = { value: SUN_RADIUS };
+  /** Saturn's rings up close: individual chunks of ice that appear as the camera nears. */
+  private ringChunks?: THREE.ShaderMaterial;
   /** Boiling plasma baked each frame into a cube map, read by the Sun's surface shader. */
   private noiseCube = new SunNoiseCube();
   /** «Політ крізь Галактику»: helical trails of the planets behind the moving Sun. */
@@ -109,6 +100,19 @@ export class Solar implements SceneModule {
   private driftPose: { pos: THREE.Vector3; target: THREE.Vector3 } | null = null;
   private driftTween?: gsap.core.Tween;
   onDrift: (on: boolean) => void = () => {};
+  /**
+   * Guided close-ups: a solar or lunar eclipse set up on the spot, or riding along with the
+   * comet. The camera is driven here and handed back afterwards.
+   */
+  private show: {
+    kind: 'solar' | 'lunar' | 'comet';
+    t: number;
+    pose: { pos: THREE.Vector3; target: THREE.Vector3 };
+    from: { pos: THREE.Vector3; target: THREE.Vector3 };
+    speed: number;
+  } | null = null;
+  private showTween?: gsap.core.Tween;
+  onShow: (kind: 'solar' | 'lunar' | 'comet' | null) => void = () => {};
   private corona: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
   private milkyWay: ReturnType<typeof createMilkyWay>;
   private comet = new Comet();
@@ -119,9 +123,13 @@ export class Solar implements SceneModule {
   private kuiper!: THREE.ShaderMaterial;
   private wind!: THREE.ShaderMaterial;
   private unregisterExtra: (() => void)[] = [];
-  private rocks!: THREE.InstancedMesh<THREE.IcosahedronGeometry, THREE.ShaderMaterial>;
-  private rockData: { r: number; a: number; y: number; size: number; spin: THREE.Vector3; spinSpeed: number }[] = [];
+  private rocks = new AsteroidRocks();
   private starfield = createStarfield(6000, 300, 21);
+  /** The real bright stars and, on demand (K), the constellation figures. */
+  private brightStars = createBrightStars();
+  private figuresOn = false;
+  /** 0..1 fade of the constellation figures and their names. */
+  figuresWeight = 0;
   private controls: OrbitControls;
   /** Sky (stars + Milky Way band) lives outside the scaled system group. */
   private sky = new THREE.Group();
@@ -160,24 +168,49 @@ export class Solar implements SceneModule {
   private comparePose: { pos: THREE.Vector3; target: THREE.Vector3 } | null = null;
   readonly compareLabels: CompareLabel[] = [];
   private compareCenter = new THREE.Vector3();
+  private wormhole = new Wormhole();
+  private wormholeHovered = false;
+  private humLevel = 0;
+  /** Flight into the wormhole, and the pose to come back to. */
+  private portal: {
+    t: number;
+    fired: boolean;
+    /** In: flying up to the wormhole; out: flying away from it, back to `back`. */
+    dir: 'in' | 'out';
+    back: { pos: THREE.Vector3; target: THREE.Vector3 };
+    /** The speed at the mouth, as the slope of the easing (at the end going in, the start out). */
+    s0?: number;
+  } | null = null;
 
   constructor(private ctx: Ctx) {
-    this.sun = this.buildSun();
-    this.buildLoops();
-    this.corona = this.buildCorona();
+    const sun = buildSun(this.noiseCube);
+    this.sun = sun.mesh;
+    this.spotGroups = sun.spotGroups;
+    this.loops = buildLoops(this.sun, this.spotGroups, this.loopIntensity, this.loopSunR);
+    this.corona = buildCorona();
     this.milkyWay = createMilkyWay(ctx.renderer);
-    this.sky.add(this.milkyWay.mesh, this.starfield);
+    this.sky.add(this.milkyWay.mesh, this.starfield, this.brightStars.group);
     this.group.add(this.sun, this.corona, this.comet.group);
-    [...PLANETS, ...DWARFS].forEach((p, i) => this.planets.push(this.buildPlanet(p, i)));
-    this.buildKuiperBelt();
-    this.buildSolarWind();
+    [...PLANETS, ...DWARFS].forEach((p, i) => this.planets.push(buildPlanet(p, i, this.group)));
+    const kuiper = buildKuiperBelt();
+    this.kuiper = kuiper.material;
+    this.group.add(kuiper.points);
+    this.unregisterExtra.push(ctx.quality.register(kuiper.geometry, kuiper.count));
+    const wind = buildSolarWind();
+    this.wind = wind.material;
+    this.group.add(wind.points);
     this.buildMoons();
+    this.ringChunks = buildRingChunks(this.planets.find((p) => p.data.id === 'saturn')!);
     this.buildDrift();
     this.loadEarthTextures();
     this.loadPlanetTextures();
     this.buildLineup();
-    const belt = this.buildBelt();
+    const saturn = this.planets.find((p) => p.data.id === 'saturn')!;
+    this.wormhole.group.position.copy(WORMHOLE_OFFSET);
+    saturn.pivot.add(this.wormhole.group);
+    const belt = buildBelt();
     this.belt = belt.material;
+    this.group.add(belt.points, this.rocks.mesh);
     this.unregister = ctx.quality.register(belt.geometry, belt.count);
 
     this.controls = new OrbitControls(ctx.camera, ctx.canvas);
@@ -194,979 +227,6 @@ export class Solar implements SceneModule {
   }
 
   // ---------------------------------------------------------------- build
-
-  private buildSun() {
-    // Sunspot groups in the two activity belts (±8–30° latitude): a leading and a trailing
-    // spot per group, plus a few loners. xyz = direction on the unrotated Sun, w = radius.
-    const rand = mulberry32(1859);
-    const spots: THREE.Vector4[] = [];
-    this.spotGroups = [];
-    const groups = [
-      { lat: 14, lon: 20 }, { lat: -11, lon: 95 }, { lat: 22, lon: 170 }, { lat: -19, lon: 250 }, { lat: 9, lon: 305 },
-    ];
-    for (const g of groups) {
-      const n = 2 + Math.floor(rand() * 2);
-      const members: THREE.Vector3[] = [];
-      this.spotGroups.push(members);
-      for (let k = 0; k < n; k++) {
-        const lat = THREE.MathUtils.degToRad(g.lat + (rand() - 0.5) * 4 + (k > 0 ? (g.lat > 0 ? 1.5 : -1.5) : 0));
-        const lon = THREE.MathUtils.degToRad(g.lon - k * (5 + rand() * 4));
-        const r = (k === 0 ? 0.085 : 0.05) * (0.7 + rand() * 0.6);
-        spots.push(new THREE.Vector4(Math.cos(lat) * Math.cos(lon), Math.sin(lat), -Math.cos(lat) * Math.sin(lon), r));
-        members.push(new THREE.Vector3(spots[spots.length - 1].x, spots[spots.length - 1].y, spots[spots.length - 1].z));
-      }
-    }
-    while (spots.length < SUN_SPOTS) spots.push(new THREE.Vector4(0, 1, 0, 0));
-    spots.length = SUN_SPOTS;
-
-    const material = new THREE.ShaderMaterial({
-      uniforms: {
-        uTime: globalUniforms.uTime,
-        uColor: colorUniform(config.colors.sun),
-        uFade: { value: 0 },
-        uFlareDir: { value: new THREE.Vector3(1, 0, 0) },
-        uFlareAge: { value: 99 },
-        uGran: { value: 34 },
-        uSpots: { value: spots },
-        uPerlin: { value: this.noiseCube.texture },
-        uTint: { value: 0.92 },
-        uBright: { value: 0.92 },
-      },
-      vertexShader: PLANET_VERT,
-      fragmentShader: /* glsl */ `
-        ${NOISE}
-        uniform float uTime;
-        uniform vec3 uColor;
-        uniform float uFade;
-        uniform vec3 uFlareDir;
-        uniform float uFlareAge;
-        uniform float uGran;
-        uniform vec4 uSpots[${SUN_SPOTS}];
-        uniform samplerCube uPerlin;
-        uniform float uTint;
-        uniform float uBright;
-        varying vec3 vObj;
-        varying vec3 vNormalW;
-        varying vec3 vPosW;
-        // 3D Worley noise: F1 and F2 distances to the nearest feature points, and a random
-        // value for the nearest cell (so every granule gets its own brightness).
-        vec3 worley(vec3 p) {
-          vec3 i = floor(p);
-          vec3 f = fract(p);
-          float f1 = 8.0; float f2 = 8.0; float id = 0.0;
-          for (int x = -1; x <= 1; x++)
-          for (int y = -1; y <= 1; y++)
-          for (int z = -1; z <= 1; z++) {
-            vec3 g = vec3(float(x), float(y), float(z));
-            vec3 h = i + g;
-            vec3 r = fract(sin(vec3(dot(h, vec3(127.1, 311.7, 74.7)), dot(h, vec3(269.5, 183.3, 246.1)), dot(h, vec3(113.5, 271.9, 124.6)))) * 43758.5453);
-            float seed = r.x;
-            r = 0.5 + 0.42 * sin(uTime * 0.22 + 6.2831 * r);   // granules slowly boil
-            float d = length(g + r - f);
-            if (d < f1) { f2 = f1; f1 = d; id = seed; } else if (d < f2) { f2 = d; }
-          }
-          return vec3(f1, f2, id);
-        }
-
-        void main() {
-          vec3 o = vObj;
-          vec3 V = normalize(cameraPosition - vPosW);
-          float mu = clamp(dot(normalize(vNormalW), V), 0.0, 1.0);
-          // The Sun turns once every ~3 minutes here; everything on the surface rides along.
-          float th = uTime * 0.035;
-          vec3 q = vec3(o.x * cos(th) + o.z * sin(th), o.y, -o.x * sin(th) + o.z * cos(th));
-
-          // Granulation: bright, domed cells split by dark lanes. When the cells shrink below
-          // a pixel they melt into their mean brightness instead of shimmering.
-          vec3 gp = q * uGran * 1.45 + snoise(q * 5.0 + uTime * 0.03) * 0.5;
-          float px = length(fwidth(gp));
-          float detail = 1.0 - smoothstep(0.35, 0.9, px);
-          // Domed cells of varied brightness (each brightening and dimming as it evolves),
-          // separated by soft, darker lanes; skipped entirely once they are sub-pixel.
-          // Gentle contrast: granulation is a texture on the disk, not a mosaic.
-          float gran = 0.82;
-          if (detail > 0.01) {
-            vec3 w = worley(gp);
-            float own = 0.78 + 0.32 * fract(w.z * 17.0 + uTime * 0.03);
-            float dome = smoothstep(1.05, 0.05, w.x);
-            float lane = smoothstep(0.0, 0.5, w.y - w.x);
-            float cell = (0.45 + 0.65 * dome) * (0.62 + 0.38 * lane) * own;
-            gran = mix(0.82, mix(0.82, cell, 0.6), detail);
-          }
-          // Larger, gentler mottling and slow brightness drift.
-          float meso = fbm3(q * 9.0 + vec3(0.0, uTime * 0.02, 0.0));
-          float large = fbm3(q * 2.6 + vec3(0.0, uTime * 0.01, uTime * 0.006));
-
-          // Sunspots: dark umbra, a filamentary penumbra, bright faculae around the group.
-          float umbra = 0.0;
-          float pen = 0.0;
-          float plage = 0.0;
-          for (int i = 0; i < ${SUN_SPOTS}; i++) {
-            vec4 sp = uSpots[i];
-            if (sp.w <= 0.0) continue;
-            vec3 c = sp.xyz;
-            float cd = dot(q, c);
-            if (cd < 0.8) continue;
-            vec3 v = q - c * cd;
-            vec3 t1 = normalize(cross(c, vec3(0.0, 1.0, 0.0001)));
-            vec3 t2 = cross(c, t1);
-            float rr = length(v) / sp.w;
-            float ang = atan(dot(v, t2), dot(v, t1));
-            float rag = snoise(vec3(ang * 1.6, rr * 1.5, float(i) * 3.7 + uTime * 0.02)) * 0.12;
-            float fil = 0.5 + 0.5 * sin(ang * 38.0 + snoise(vec3(ang * 4.0, rr * 3.0, float(i))) * 4.0);
-            float p = 1.0 - smoothstep(0.9, 1.05, rr + rag);
-            float u = 1.0 - smoothstep(0.36, 0.46, rr + rag * 0.6);
-            pen = max(pen, p * (0.75 + 0.25 * fil) * (1.0 - u));
-            umbra = max(umbra, u);
-            plage += (1.0 - smoothstep(1.2, 3.2, rr)) * (1.0 - p);
-          }
-
-          // Faculae: bright network that stands out towards the limb, strongest near spots.
-          float network = smoothstep(0.2, 0.55, fbm3(q * 7.0 + 21.0));
-          float limbW = pow(1.0 - mu, 1.3);
-          float faculae = (network * 0.5 + min(plage, 1.0) * 0.9) * limbW;
-
-          // Convection: the baked 4D noise cube read through three frames turning slowly
-          // about different axes and averaged, so the plasma churns rather than slides.
-          float lt = uTime * 0.02;
-          float lt1 = lt + 2.094;
-          float lt2 = lt + 4.188;
-          vec3 l0 = q; l0.yz = mat2(cos(lt), -sin(lt), sin(lt), cos(lt)) * l0.yz;
-          vec3 l1 = q; l1.zx = mat2(cos(lt1), -sin(lt1), sin(lt1), cos(lt1)) * l1.zx;
-          vec3 l2 = q; l2.xy = mat2(cos(lt2), -sin(lt2), sin(lt2), cos(lt2)) * l2.xy;
-          vec2 churn = (textureCube(uPerlin, l0).rg + textureCube(uPerlin, l1).rg + textureCube(uPerlin, l2).rg) / 3.0;
-          float conv = (churn.x - 0.5) * 1.6 + (churn.y - 0.5) * 0.3;
-
-          // Everything sets one brightness value; a single colour ramp then turns it into fire.
-          float b = 0.66 + conv * 0.42;
-          b *= gran / 0.82 * (0.94 + meso * 0.08 + large * 0.08);
-          b += faculae * 0.2;
-          b *= 1.0 - pen * 0.42;
-          b = mix(b, 0.22, umbra);
-          // Limb darkening pulls the edge down the ramp (dimmer and redder)...
-          b *= 0.6 + 0.4 * pow(mu, 0.55);
-          // ...and a thin Fresnel rim lights it up again right at the edge.
-          b += pow(1.0 - mu, 5.0) * 0.35;
-
-          // Brightness to colour: (b, b^2, b^4) climbs from deep red through orange to white.
-          // Past white it only gets brighter (HDR), so bloom picks out the hottest cells.
-          float bt = max(b, 0.0) * uTint;
-          float bc = min(bt, 1.0);
-          vec3 col = vec3(bc, bc * bc, bc * bc * bc * bc) * (bt / max(bc, 1e-3)) / uTint * uBright;
-
-          // Solar flare: two bright ribbons flashing in an active region, then fading.
-          if (uFlareAge < 6.0) {
-            float c = dot(o, normalize(uFlareDir));
-            vec3 t = normalize(cross(uFlareDir, vec3(0.0, 1.0, 0.0)));
-            float across = dot(o - uFlareDir * c, t);
-            float region = smoothstep(0.985, 0.997, c);
-            float rib = (abs(across) - 0.035) / 0.012;
-            float ribbons = exp(-rib * rib);
-            ribbons *= 0.6 + 0.6 * (snoise(o * 60.0 + uTime) * 0.5 + 0.5);
-            float flash = exp(-uFlareAge * 0.9) * smoothstep(0.0, 0.15, uFlareAge);
-            col += vec3(1.0, 0.95, 0.85) * (ribbons * region * 3.0 + region * 0.4) * flash;
-          }
-          gl_FragColor = vec4(max(col, 0.0) * uFade, 1.0);
-        }`,
-    });
-    return new THREE.Mesh(new THREE.SphereGeometry(SUN_RADIUS, 128, 96), material);
-  }
-
-  /**
-   * Coronal loops: magnetic arches of hot plasma rooted in the sunspot groups. Real tube
-   * geometry, so they stand above the surface in 3D and show in profile at the limb;
-   * bright knots of plasma stream along them from one footpoint to the other.
-   */
-  private buildLoops(): void {
-    const rand = mulberry32(2024);
-    const shared = { uTime: globalUniforms.uTime, uIntensity: this.loopIntensity, uSunR: this.loopSunR };
-    const slerp = (a: THREE.Vector3, b: THREE.Vector3, t: number) => {
-      const w = Math.acos(THREE.MathUtils.clamp(a.dot(b), -1, 1));
-      if (w < 1e-5) return a.clone();
-      return a.clone().multiplyScalar(Math.sin((1 - t) * w) / Math.sin(w)).addScaledVector(b, Math.sin(t * w) / Math.sin(w));
-    };
-    for (const g of this.spotGroups) {
-      const lead = g[0];
-      const trail = g[g.length - 1];
-      const span = trail.clone().sub(lead);
-      for (let k = 0; k < 6; k++) {
-        const jitter = () => new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).multiplyScalar(0.06);
-        const a = lead.clone().addScaledVector(span, -0.15 + rand() * 0.2).add(jitter()).normalize();
-        const b = trail.clone().addScaledVector(span, 0.3 + rand() * 0.6).add(jitter()).normalize();
-        const h = 0.08 + rand() * 0.22;
-        const lean = jitter().multiplyScalar(1.5);
-        const pts: THREE.Vector3[] = [];
-        for (let i = 0; i <= 24; i++) {
-          const t = i / 24;
-          const up = Math.sin(Math.PI * t);
-          pts.push(slerp(a, b, t).addScaledVector(lean, up).normalize().multiplyScalar(SUN_RADIUS * (1.0 + h * up)));
-        }
-        const geo = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 64, SUN_RADIUS * (0.011 + rand() * 0.01), 8, false);
-        const mat = new THREE.ShaderMaterial({
-          uniforms: { ...shared, uSeed: { value: rand() * 100 } },
-          vertexShader: /* glsl */ `
-            varying vec2 vUv;
-            varying vec3 vN;
-            varying vec3 vPosW;
-            void main() {
-              vUv = uv;
-              vN = normalize(mat3(modelMatrix) * normal);
-              vec4 w = modelMatrix * vec4(position, 1.0);
-              vPosW = w.xyz;
-              gl_Position = projectionMatrix * viewMatrix * w;
-            }`,
-          fragmentShader: /* glsl */ `
-            uniform float uTime;
-            uniform float uIntensity;
-            uniform float uSeed;
-            uniform float uSunR;
-            varying vec2 vUv;
-            varying vec3 vN;
-            varying vec3 vPosW;
-            void main() {
-              float along = vUv.x;
-              // Seen against the bright disk the loops would only wash it out; beyond the
-              // limb, against dark sky, they glow in full.
-              vec3 rd = normalize(vPosW - cameraPosition);
-              float tc = dot(-cameraPosition, rd);
-              float b = length(cameraPosition + rd * max(tc, 0.0));
-              float offDisk = smoothstep(uSunR * 0.97, uSunR * 1.02, b);
-              float vis = mix(0.25, 1.0, offDisk);
-              // Knots of plasma racing along the loop, and the loop as a whole slowly
-              // brightening and fading like a real active region.
-              float knots = 0.5 + 0.5 * sin(along * 26.0 - uTime * 2.2 + uSeed);
-              knots = knots * knots;
-              float life = 0.45 + 0.55 * (0.5 + 0.5 * sin(uTime * 0.23 + uSeed * 1.7));
-              float ends = smoothstep(0.0, 0.06, along) * smoothstep(1.0, 0.94, along);
-              float foot = 1.0 + 1.2 * (exp(-along * 18.0) + exp(-(1.0 - along) * 18.0));
-              vec3 V = normalize(cameraPosition - vPosW);
-              float facing = clamp(abs(dot(normalize(vN), V)), 0.0, 1.0);
-              float core = facing * facing;
-              vec3 col = mix(vec3(1.0, 0.34, 0.05), vec3(1.0, 0.62, 0.2), knots);
-              float k = (0.3 + 0.7 * knots) * core * ends * foot * life * uIntensity;
-              gl_FragColor = vec4(col * k * vis * 0.55, 1.0);
-            }`,
-          transparent: true,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-        });
-        this.loops.add(new THREE.Mesh(geo, mat));
-      }
-    }
-    this.sun.add(this.loops);
-    this.loops.add(
-      createSunStrands({
-        radius: SUN_RADIUS,
-        groups: this.spotGroups,
-        count: Math.round(1400 * Math.max(0.5, config.particleScale)),
-        uTime: globalUniforms.uTime,
-        intensity: this.loopIntensity,
-        sunR: this.loopSunR,
-      }),
-    );
-  }
-
-  private buildCorona() {
-    const material = new THREE.ShaderMaterial({
-      uniforms: {
-        uTime: globalUniforms.uTime,
-        uColor: colorUniform(config.colors.sun),
-        uIntensity: { value: 0 },
-        uFlareAngle: { value: 0 },
-        uFlareAge: { value: 99 },
-      },
-      vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-      fragmentShader: /* glsl */ `
-        ${NOISE}
-        uniform float uTime;
-        uniform vec3 uColor;
-        uniform float uIntensity;
-        uniform float uFlareAngle;
-        uniform float uFlareAge;
-        varying vec2 vUv;
-
-        float hash1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
-        float angDiff(float a, float b) { return mod(a - b + 3.14159, 6.28318) - 3.14159; }
-
-        void main() {
-          vec2 p = (vUv - 0.5) * 2.0;
-          float r = length(p);
-          float r0 = 0.125;                       // quad spans 16 solar radii
-          float rs = r / r0;                      // distance in solar radii
-          float ang = atan(p.y, p.x);
-          float h = max(rs - 1.0, 0.0);
-
-          // ---- Corona: soft K-corona glow plus a few broad, slowly turning streamers.
-          float rot = uTime * 0.008;
-          float streamers = 0.0;
-          for (int i = 0; i < 5; i++) {
-            float fi = float(i);
-            float a0 = fi * 1.2566 + hash1(fi + 3.0) * 0.8 + rot;
-            float width = 0.18 + 0.14 * hash1(fi + 9.0);
-            float da = angDiff(ang, a0);
-            // Streamers taper with height, like helmet streamers.
-            float w = width / (1.0 + h * 0.9);
-            streamers += exp(-da * da / (w * w)) * (0.5 + 0.5 * hash1(fi + 5.0));
-          }
-          float wisp = snoise(vec3(cos(ang) * 3.0, sin(ang) * 3.0, uTime * 0.03 + h * 0.6)) * 0.5 + 0.5;
-          float kCorona = pow(1.0 + h, -3.2);
-          // Fine radial rays and polar plumes: thin filaments along the magnetic field.
-          float rays = snoise(vec3(cos(ang) * 22.0, sin(ang) * 22.0, h * 0.25 + uTime * 0.015)) * 0.5 + 0.5;
-          rays = mix(rays, snoise(vec3(cos(ang) * 60.0, sin(ang) * 60.0, h * 0.4 - uTime * 0.01)) * 0.5 + 0.5, 0.35);
-          float fCorona = pow(1.0 + h, -1.8) * (0.25 + streamers * 0.6) * (0.75 + wisp * 0.5) * (0.65 + rays * 0.7);
-          // Material streaming away: structures drift outwards through the corona.
-          float outflow = snoise(vec3(cos(ang) * 14.0, sin(ang) * 14.0, h * 3.0 - uTime * 0.35)) * 0.5 + 0.5;
-          fCorona *= 0.72 + 0.56 * outflow;
-          // The whole corona breathes very slowly.
-          fCorona *= 0.92 + 0.08 * sin(uTime * 0.21);
-          float glow = (kCorona * 0.9 + fCorona * 0.55) * step(1.0, rs) * smoothstep(5.0, 2.2, rs);
-          vec3 col = mix(vec3(1.0, 0.92, 0.78), uColor, 0.35) * glow;
-
-          // ---- Chromosphere: a thin red rim.
-          float chromo = exp(-(((rs - 1.0) / 0.015) * ((rs - 1.0) / 0.015)));
-          // Spicules: a flickering fringe of tiny jets standing on the limb.
-          float spikes = snoise(vec3(ang * 140.0, uTime * 0.9, 3.0)) * 0.5 + 0.5;
-          float spicH = 0.018 + 0.03 * spikes;
-          float spic = step(1.0, rs) * (1.0 - smoothstep(0.0, spicH, rs - 1.0)) * smoothstep(0.35, 0.9, spikes);
-          chromo += spic * 0.7;
-
-          // ---- Prominences with a life cycle: grow, hang, drain and dissipate, then
-          // reappear elsewhere on the limb.
-          float prom = 0.0;
-          for (int i = 0; i < 5; i++) {
-            float fi = float(i);
-            float period = 16.0 + hash1(fi * 7.3) * 14.0;
-            float cyc = uTime / period + hash1(fi * 3.1);
-            float life = fract(cyc);
-            float gen = floor(cyc);
-            float a0 = hash1(gen * 13.7 + fi * 5.1) * 6.28318;
-            float halfW = 0.09 + 0.09 * hash1(gen + fi * 2.3);
-            float H = 0.12 + 0.2 * hash1(gen * 2.9 + fi);
-            float grow = smoothstep(0.0, 0.3, life);
-            float fade = 1.0 - smoothstep(0.6, 0.92, life);
-            float lift = smoothstep(0.55, 0.92, life) * 0.25;   // some lift off as they fade
-            float x = angDiff(ang, a0) / halfW;
-            if (abs(x) < 1.15 && fade > 0.0) {
-              float arc = sqrt(max(1.0 - x * x, 0.0));
-              // Turbulent plasma makes the arch ragged and flame-like rather than a clean hoop.
-              float turb = snoise(vec3(x * 3.0, rs * 9.0 - uTime * 0.25, fi * 7.0 + gen)) * 0.5 + 0.5;
-              float hh = (H * grow * arc + lift * arc) * (0.8 + 0.4 * turb);
-              // Plasma drains down both legs: noise advected along the arc.
-              float flow = snoise(vec3(abs(x) * 5.0 - uTime * 0.7, rs * 18.0, fi * 4.0 + gen)) * 0.5 + 0.5;
-              float strands = 0.0;
-              for (int k = -1; k <= 1; k++) {
-                float off = float(k) * 0.024 * (1.0 + hh * 3.0);
-                float d = abs(rs - 1.0 - hh - off);
-                float thick = 0.016 + 0.016 * flow;
-                strands += exp(-d * d / (thick * thick)) * (k == 0 ? 1.0 : 0.6);
-              }
-              float legs = smoothstep(1.15, 0.85, abs(x));
-              prom += strands * (0.4 + 0.9 * flow) * legs * fade;
-              // A glowing, wispy body of plasma fills the arch beneath the strands.
-              float inside = step(1.0, rs) * smoothstep(1.0 + hh + 0.02, 1.0 + hh * 0.55, rs);
-              float wisps = snoise(vec3(x * 6.0, rs * 30.0, uTime * 0.2 + fi)) * 0.5 + 0.5;
-              prom += inside * (0.12 + 0.35 * wisps * flow) * fade * legs;
-            }
-          }
-          float hcol = clamp(h / 0.25, 0.0, 1.0);
-          // Hot orange-red hydrogen glow (no blue, so bloom keeps it fiery rather than pink).
-          vec3 promCol = mix(vec3(1.0, 0.5, 0.14), vec3(0.9, 0.16, 0.03), hcol);
-          col += promCol * prom * 1.8 + vec3(1.0, 0.2, 0.06) * chromo * 0.9;
-
-          // ---- Coronal mass ejection after a flare: an expanding, fading bright front.
-          if (uFlareAge < 6.0) {
-            float da = angDiff(ang, uFlareAngle);
-            float front = 1.0 + uFlareAge * 0.55;
-            float spread = 0.32 + uFlareAge * 0.06;
-            float ragged = snoise(vec3(cos(ang) * 7.0, sin(ang) * 7.0, uFlareAge * 0.4)) * 0.5 + 0.5;
-            float shell = exp(-(((rs - front - (ragged - 0.5) * 0.12 * uFlareAge) / (0.05 + uFlareAge * 0.035)) * ((rs - front - (ragged - 0.5) * 0.12 * uFlareAge) / (0.05 + uFlareAge * 0.035))));
-            shell *= 0.45 + 0.9 * ragged;
-            float inside = smoothstep(front, 1.0, rs) * step(1.0, rs) * 0.25;
-            float cone = exp(-da * da / (spread * spread));
-            float cmeFade = exp(-uFlareAge * 0.55) * smoothstep(0.0, 0.25, uFlareAge) * smoothstep(6.5, 3.5, front);
-            col += vec3(1.0, 0.86, 0.7) * (shell + inside) * cone * cmeFade * 0.9;
-            // Post-flare loops glowing at the limb.
-            float loops = exp(-(((rs - 1.04) / 0.03) * ((rs - 1.04) / 0.03))) * exp(-da * da / 0.012);
-            col += vec3(1.0, 0.6, 0.35) * loops * exp(-uFlareAge * 0.4) * 1.4;
-          }
-
-          // Everything fades out well before the quad's edge, so nothing is ever clipped.
-          col *= smoothstep(1.0, 0.82, r);
-          gl_FragColor = vec4(col * uIntensity, 1.0);
-        }`,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(SUN_RADIUS * 16, SUN_RADIUS * 16), material);
-    mesh.renderOrder = 2;
-    return mesh;
-  }
-
-  private buildPlanet(data: Planet, index: number): PlanetView {
-    const pivot = new THREE.Object3D();
-    const tilt = new THREE.Object3D();
-    tilt.rotation.z = THREE.MathUtils.degToRad(data.tilt);
-    pivot.add(tilt);
-
-    const [a, b, c, atmo] = data.colors;
-    const shaderKind = data.id === 'venus' ? KIND_INDEX.ice : KIND_INDEX[data.kind];
-    const material = new THREE.ShaderMaterial({
-      uniforms: {
-        uKind: { value: shaderKind },
-        uA: colorUniform(a),
-        uB: colorUniform(b),
-        uC: colorUniform(c),
-        uAtmo: colorUniform(atmo),
-        uSeed: { value: index * 13.7 + 3.1 },
-        uTime: globalUniforms.uTime,
-        uHighlight: { value: 0 },
-        uFade: { value: 0 },
-        uSpot: { value: data.spot ? new THREE.Vector4(data.spot.lat, data.spot.lon, data.spot.radius, 1) : new THREE.Vector4(0, 0, 0, 0) },
-        uSpotColor: colorUniform(data.spot?.color ?? '#000000'),
-        uRingNormal: { value: new THREE.Vector3(0, 1, 0) },
-        uRingCenter: { value: new THREE.Vector3() },
-        uRingInner: { value: data.rings ? data.size * 1.3 : 0 },
-        uRingOuter: { value: data.rings ? data.size * 2.35 : 0 },
-        uHex: { value: data.id === 'saturn' ? 1 : 0 },
-        uFlash: { value: new THREE.Vector4(1, 0, 0, 0) },
-        uOccPos: { value: new THREE.Vector3() },
-        uOccR: { value: 0 },
-        uCraters: { value: CRATERS[data.id] ?? 0 },
-        // Earth only: NASA Blue/Black Marble maps (loaded after start; procedural until then).
-        uDay: { value: null },
-        uNight: { value: null },
-        uWater: { value: null },
-        uCloudTex: { value: null },
-        uTex: { value: 0 },
-        // Every other body: a Solar System Scope colour map (procedural until it arrives).
-        uMap: { value: null },
-        uMapOn: { value: 0 },
-        uPolarCap: { value: data.id === 'mars' ? 1 : 0 },
-      },
-      vertexShader: PLANET_VERT,
-      fragmentShader: /* glsl */ `
-        ${NOISE}
-        uniform int uKind;
-        uniform vec3 uA;
-        uniform vec3 uB;
-        uniform vec3 uC;
-        uniform vec3 uAtmo;
-        uniform float uSeed;
-        uniform float uTime;
-        uniform float uHighlight;
-        uniform vec4 uSpot;
-        uniform vec3 uSpotColor;
-        uniform vec3 uRingNormal;
-        uniform vec3 uRingCenter;
-        uniform float uRingInner;
-        uniform float uRingOuter;
-        uniform float uHex;
-        uniform vec4 uFlash;
-        uniform vec3 uOccPos;
-        uniform float uOccR;
-        uniform float uFade;
-        uniform float uCraters;
-        uniform float uPolarCap;
-        uniform sampler2D uDay;
-        uniform sampler2D uNight;
-        uniform sampler2D uWater;
-        uniform sampler2D uCloudTex;
-        uniform float uTex;
-        uniform sampler2D uMap;
-        uniform float uMapOn;
-        varying vec3 vObj;
-        varying vec3 vNormalW;
-        varying vec3 vPosW;
-        varying vec3 vSunObj;
-
-        vec3 hash33(vec3 p) {
-          p = vec3(dot(p, vec3(127.1, 311.7, 74.7)), dot(p, vec3(269.5, 183.3, 246.1)), dot(p, vec3(113.5, 271.9, 124.6)));
-          return fract(sin(p) * 43758.5453);
-        }
-
-        // Impact craters at one scale: x = change in lighting (bowls lit on the far wall,
-        // shadowed on the near one; raised rims the other way round), y = albedo change.
-        vec2 craters(vec3 p, vec3 L, float density) {
-          vec3 i = floor(p);
-          vec3 f = fract(p);
-          vec2 acc = vec2(0.0);
-          for (int x = -1; x <= 1; x++)
-          for (int y = -1; y <= 1; y++)
-          for (int z = -1; z <= 1; z++) {
-            vec3 g = vec3(float(x), float(y), float(z));
-            vec3 h = hash33(i + g);
-            if (h.z > density) continue;
-            float R = 0.16 + 0.3 * fract(h.x * 7.3 + h.y * 3.1);
-            vec3 c = g + h - f;
-            float len = length(c);
-            float d = len / R;
-            if (d > 1.4) continue;
-            vec3 dir = c / max(len, 1e-4);
-            float rim = 1.0 - smoothstep(1.0, 1.4, d);
-            float slope = d < 1.0 ? d * d : -rim * 0.7;
-            acc.x += dot(dir, L) * slope;
-            acc.y += d < 1.0 ? -0.05 : 0.05 * rim;
-          }
-          return acc;
-        }
-
-        // Equirectangular lookup from a direction on the sphere (matches SphereGeometry's UVs),
-        // choosing derivatives so the longitude wrap leaves no mip-map seam.
-        vec2 eqUV(vec3 d) {
-          return vec2(fract(atan(d.z, -d.x) / 6.2831853), asin(clamp(d.y, -1.0, 1.0)) / 3.14159265 + 0.5);
-        }
-        vec4 eqTex(sampler2D t, vec3 d) {
-          vec2 uv = eqUV(d);
-          vec2 uv2 = vec2(fract(uv.x + 0.5), uv.y);
-          vec2 dx = dFdx(uv);
-          vec2 dy = dFdy(uv);
-          vec2 dx2 = dFdx(uv2);
-          vec2 dy2 = dFdy(uv2);
-          if (dot(dx2, dx2) + dot(dy2, dy2) < dot(dx, dx) + dot(dy, dy)) { dx = dx2; dy = dy2; }
-          return textureGrad(t, uv, dx, dy);
-        }
-        // Cheap flow field (layered, rotated sines): nudging the cloud lookup with it makes a
-        // still cloud map look alive, swirling slowly, with no animated texture at all.
-        vec3 flowSine(vec3 p, float t) {
-          vec3 sum = vec3(0.0);
-          float amp = 1.0;
-          for (int i = 0; i < 3; i++) {
-            p = vec3(p.y * 0.8 + p.z * 0.6, p.z * 0.8 - p.x * 0.6, p.x * 0.8 + p.y * 0.6);
-            vec3 w = sin(p + t + sum.zxy) * amp;
-            sum += w;
-            p *= 1.7;
-            amp *= 0.6;
-          }
-          return sum;
-        }
-
-        // Earth's clouds: wind-sheared bands with domain-warped swirls, drifting eastwards.
-        float earthClouds(vec3 o) {
-          vec3 q = o * vec3(2.3, 4.0, 2.3) + vec3(uTime * 0.03, 0.0, uSeed + uTime * 0.018);
-          vec3 w = vec3(fbm3(q * 0.9 + 1.7), fbm3(q * 0.9 + 8.3), fbm3(q * 0.9 + 4.1));
-          float n = fbm5(q + w * 1.1);
-          // Clear skies over the subtropical deserts, storm belts at mid-latitudes.
-          float belts = 0.82 + 0.18 * cos(abs(o.y) * 10.5);
-          return smoothstep(0.06, 0.5, n * belts + 0.04);
-        }
-
-        void main() {
-          vec3 o = vObj;
-          vec3 col;
-          float cityLights = 0.0;
-          float aurora = 0.0;
-          float oceanMask = 0.0;
-          float cloudCover = 0.0;
-          if (uMapOn > 0.5) {
-            vec3 mo = o;
-            if (uKind >= 2) {
-              // Gas and ice giants, and Venus's cloud deck: neighbouring bands sway past each
-              // other and churn gently through the flow field, all from one still map.
-              float jet = sin(o.y * 13.0);
-              float a = jet * 0.05 * sin(uTime * 0.03 + uSeed);
-              mo = vec3(o.x * cos(a) - o.z * sin(a), o.y, o.x * sin(a) + o.z * cos(a));
-              mo = normalize(mo + flowSine(mo * vec3(9.0, 22.0, 9.0), uTime * 0.18 + uSeed) * 0.0025);
-            }
-            col = eqTex(uMap, mo).rgb;
-            if (uKind == 2) col *= 0.88;
-          } else if (uKind == 0) {
-            float f = fbm5(o * 3.0 + uSeed);
-            float g = fbm3(o * 10.0 + uSeed * 2.0);
-            col = mix(uB, uA, smoothstep(-0.45, 0.45, f));
-            col = mix(col, uC, smoothstep(0.15, 0.6, g) * 0.45);
-            if (uCraters > 0.0) {
-              // Two sizes of craters; the small ones melt away when they shrink below a pixel.
-              // Sunlight along the surface: strong at the terminator, vanishing where the
-              // Sun is overhead (no shadows there), exactly as on the real Moon.
-              vec3 Lo = normalize(vSunObj);
-              Lo = (Lo - o * dot(Lo, o)) * 1.25;
-              vec3 p1 = o * 6.0 + uSeed;
-              vec3 p2 = o * 15.0 + uSeed * 1.7;
-              float d1 = 1.0 - smoothstep(0.4, 1.0, length(fwidth(p1)));
-              float d2 = 1.0 - smoothstep(0.4, 1.0, length(fwidth(p2)));
-              vec2 cr = craters(p1, Lo, 0.5) * d1 + craters(p2, Lo, 0.7) * 0.6 * d2;
-              col *= clamp(1.0 + (cr.x * 0.85 + cr.y) * uCraters, 0.25, 1.9);
-            }
-            if (uPolarCap > 0.0) {
-              // Mars: bright water/CO2 ice caps with ragged edges.
-              float cap = smoothstep(0.935, 0.955, abs(o.y) + f * 0.04 + g * 0.02);
-              col = mix(col, vec3(0.94, 0.93, 0.9), cap * uPolarCap);
-            }
-          } else if (uKind == 1 && uTex > 0.5) {
-            // The real Earth: Blue Marble surface, ocean mask, cloud map and night lights.
-            col = eqTex(uDay, o).rgb;
-            float water = eqTex(uWater, o).r;
-            // Clouds drift slowly over the ground and churn through the flow field.
-            float ct = uTime * 0.006;
-            vec3 co = vec3(o.x * cos(ct) - o.z * sin(ct), o.y, o.x * sin(ct) + o.z * cos(ct));
-            co = normalize(co + flowSine(co * 16.0, uTime * 0.25) * 0.004);
-            float clouds = eqTex(uCloudTex, co).a;
-            // Their shadows fall on the ground slightly away from the Sun.
-            float shadow = eqTex(uCloudTex, normalize(co + normalize(vSunObj) * 0.012)).a;
-            col *= 1.0 - shadow * (1.0 - clouds) * 0.45;
-            col = mix(col, vec3(0.95, 0.96, 0.98), clouds * 0.92);
-            oceanMask = water;
-            cloudCover = clouds;
-            vec3 night = eqTex(uNight, o).rgb;
-            cityLights = dot(night, vec3(0.45, 0.4, 0.15)) * (1.0 - clouds * 0.85) * 1.6;
-            float lat = abs(o.y);
-            float curtain = snoise(vec3(atan(o.z, o.x) * 7.0, lat * 26.0, uTime * 0.45)) * 0.5 + 0.5;
-            aurora = smoothstep(0.9, 0.925, lat) * (1.0 - smoothstep(0.94, 0.97, lat)) * (0.3 + 0.7 * curtain);
-          } else if (uKind == 1) {
-            // Continents: domain-warped noise gives ragged coasts, peninsulas and islands.
-            vec3 warp = vec3(fbm3(o * 1.7 + uSeed), fbm3(o * 1.7 + uSeed + 5.2), fbm3(o * 1.7 + uSeed + 9.7));
-            float f = fbm5(o * 1.9 + warp * 0.75 + uSeed);
-            float land = smoothstep(0.045, 0.07, f);
-            float lat = abs(o.y);
-            // Oceans: deep navy, turquoise over the shallow shelves along the coasts.
-            float shelf = smoothstep(-0.06, 0.045, f) * (1.0 - land);
-            vec3 ocean = mix(vec3(0.012, 0.05, 0.17), vec3(0.03, 0.19, 0.3), shelf);
-            ocean *= 0.88 + 0.24 * fbm3(o * 9.0);
-            // Land: forests and grassland, dry subtropical belts, tundra, bare mountains.
-            float moist = fbm3(o * 4.5 + warp + 13.0);
-            vec3 ground = mix(vec3(0.2, 0.26, 0.11), vec3(0.06, 0.15, 0.06), smoothstep(-0.12, 0.25, moist));
-            float dry = smoothstep(0.14, 0.28, lat) * (1.0 - smoothstep(0.42, 0.55, lat)) * smoothstep(0.1, -0.2, moist);
-            ground = mix(ground, vec3(0.6, 0.48, 0.31), clamp(dry * 1.6, 0.0, 1.0));
-            ground = mix(ground, vec3(0.3, 0.29, 0.25), smoothstep(0.72, 0.84, lat));
-            ground = mix(ground, vec3(0.42, 0.39, 0.35), smoothstep(0.24, 0.42, f) * 0.6);
-            col = mix(ocean, ground, land);
-            float ice = smoothstep(0.9, 0.94, lat + f * 0.08 + fbm3(o * 6.0) * 0.03);
-            col = mix(col, vec3(0.88, 0.92, 0.97), ice);
-            // Clouds, and their shadows cast on the ground slightly away from the Sun.
-            float clouds = earthClouds(o);
-            float shadow = earthClouds(normalize(o + normalize(vSunObj) * 0.018));
-            col *= 1.0 - shadow * (1.0 - clouds) * 0.4;
-            col = mix(col, vec3(0.93, 0.95, 0.98), clouds * 0.85);
-            oceanMask = 1.0 - land;
-            cloudCover = clouds;
-            // City lights: clustered on land, densest along the coasts, sparse in deserts.
-            float towns = smoothstep(0.6, 0.9, snoise(o * 52.0) * 0.5 + 0.5 + snoise(o * 9.0 + 3.0) * 0.35);
-            towns += smoothstep(0.82, 0.95, snoise(o * 140.0) * 0.5 + 0.5) * 0.6;
-            float coast = 1.0 - smoothstep(0.07, 0.2, f);
-            cityLights = land * (1.0 - ice) * (1.0 - clouds * 0.8) * towns * (0.45 + coast * 0.9) * (1.0 - dry * 0.7);
-            // Auroral ovals around both poles: rippling curtains.
-            float curtain = snoise(vec3(atan(o.z, o.x) * 7.0, lat * 26.0, uTime * 0.45)) * 0.5 + 0.5;
-            aurora = smoothstep(0.9, 0.925, lat) * (1.0 - smoothstep(0.94, 0.97, lat)) * (0.3 + 0.7 * curtain);
-          } else if (uKind == 2) {
-            float turb = fbm3(o * vec3(2.0, 7.0, 2.0) + uSeed) * 0.6;
-            // Eddies and festoons where neighbouring jets shear past each other, drifting
-            // slowly in alternating directions band by band.
-            float jet = sin(o.y * 13.0);
-            vec3 ep = o * vec3(5.0, 16.0, 5.0) + vec3(uTime * 0.02 * jet, 0.0, uSeed);
-            float eddy = snoise(ep + fbm3(ep * 0.7) * 1.4);
-            float shearZone = 1.0 - abs(jet);
-            turb += eddy * 0.32 * shearZone;
-            float b1 = sin(o.y * 13.0 + turb * 3.2);
-            float b2 = sin(o.y * 33.0 + turb * 5.0);
-            col = mix(uA, uB, smoothstep(-0.6, 0.6, b1));
-            col = mix(col, uC, smoothstep(0.3, 1.0, b2) * 0.45);
-            // Fine streaks within each band, and a slightly darker, less creamy overall tone
-            // so the disk keeps its detail instead of glowing white.
-            float b3 = sin(o.y * 74.0 + turb * 9.0 + eddy * 1.5);
-            col *= 0.9 + 0.1 * b3;
-            col *= 0.8;
-          } else {
-            float turb = fbm3(o * vec3(1.4, 4.0, 1.4) + uSeed) * 0.4;
-            float b = sin(o.y * 7.0 + turb * 2.0);
-            col = mix(uA, uB, 0.5 + 0.18 * b);
-            col = mix(col, uC, smoothstep(0.55, 1.0, o.y * o.y) * 0.35);
-          }
-          // Saturn's north-polar hexagon: a six-sided jet stream.
-          if (uHex > 0.5 && o.y > 0.85) {
-            float seg = 1.0471976;
-            float ang = atan(o.z, o.x) + uTime * 0.015;
-            float hexR = cos(seg * 0.5) / cos(mod(ang, seg) - seg * 0.5);
-            float rr = length(o.xz) / 0.25;
-            float inside = smoothstep(hexR + 0.06, hexR - 0.06, rr);
-            float edge = exp(-(((rr - hexR) / 0.07) * ((rr - hexR) / 0.07)));
-            // Over the real map only a faint trace, as in Cassini's views from afar.
-            float hexK = mix(1.0, 0.25, uMapOn);
-            col = mix(col, col * 0.8 + vec3(0.01, 0.03, 0.06), inside * 0.5 * hexK);
-            col = mix(col, col * 1.15, edge * 0.55 * hexK);
-          }
-          // Great storm (Jupiter's red spot, Neptune's dark spot): an oval with a swirling rim.
-          // Mapped planets already show their own storms.
-          if (uSpot.w > 0.0 && uMapOn < 0.5) {
-            float lat = asin(clamp(o.y, -1.0, 1.0));
-            float lon = atan(o.z, o.x);
-            float dl = mod(lon - uSpot.y + 3.14159, 6.28318) - 3.14159;
-            vec2 q = vec2(dl * cos(lat) / (uSpot.z * 1.7), (lat - uSpot.x) / uSpot.z);
-            float d = length(q) + snoise(vec3(q * 3.0, uSeed)) * 0.08;
-            float core = smoothstep(1.0, 0.55, d);
-            float ring = smoothstep(1.15, 0.95, d) * smoothstep(0.7, 0.92, d);
-            col = mix(col, uSpotColor, core * 0.9);
-            col = mix(col, mix(col, vec3(1.0, 0.95, 0.9), 0.35), ring * 0.6);
-          }
-          vec3 n = normalize(vNormalW);
-          vec3 L = normalize(-vPosW);
-          vec3 V = normalize(cameraPosition - vPosW);
-          float ndl = dot(n, L);
-          float diff = smoothstep(-0.12, 0.65, ndl);
-          float rim = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 3.0);
-          // Ring shadow: does the path to the Sun cross the (banded) ring plane?
-          float ringShade = 1.0;
-          if (uRingOuter > 0.0) {
-            float denom = dot(L, uRingNormal);
-            if (abs(denom) > 1e-4) {
-              float tt = dot(uRingCenter - vPosW, uRingNormal) / denom;
-              if (tt > 0.0) {
-                float rn = (length(vPosW + L * tt - uRingCenter) - uRingInner) / (uRingOuter - uRingInner);
-                if (rn > 0.0 && rn < 1.0) {
-                  float bands = 0.55 + 0.22 * sin(rn * 61.0) + 0.14 * sin(rn * 147.0 + 1.0) + 0.1 * sin(rn * 23.0);
-                  float cassini = smoothstep(0.6, 0.62, rn) * (1.0 - smoothstep(0.67, 0.69, rn));
-                  float density = bands * (1.0 - cassini * 0.92) * smoothstep(0.0, 0.05, rn) * smoothstep(1.0, 0.92, rn);
-                  ringShade = 1.0 - clamp(density * 1.5, 0.0, 1.0) * 0.88;
-                }
-              }
-            }
-          }
-          // Eclipses: is the path to the Sun blocked by a moon (or by the parent planet)?
-          vec3 eclipse = vec3(1.0);
-          if (uOccR > 0.0) {
-            vec3 toO = uOccPos - vPosW;
-            float tO = dot(toO, L);
-            if (tO > 0.0) {
-              float dO = length(toO - L * tO);
-              float shade = smoothstep(uOccR * 0.55, uOccR * 1.25, dO);
-              vec3 umbra = uKind == 1 ? vec3(0.06) : vec3(0.32, 0.11, 0.07);
-              eclipse = mix(umbra, vec3(1.0), shade);
-            }
-          }
-          vec3 lit = col * (0.03 + diff * 0.95 * ringShade * eclipse);
-          lit += uAtmo * rim * smoothstep(-0.3, 0.5, ndl) * 0.7;
-          // Hover / focus highlight; it barely touches the night side so city lights stay visible.
-          lit += (vec3(1.0, 0.86, 0.62) * rim * 1.1 + col * 0.18 * ringShade) * uHighlight * (0.15 + 0.85 * diff);
-          lit += vec3(1.0, 0.68, 0.32) * cityLights * (1.0 - smoothstep(-0.3, 0.05, ndl)) * 1.1;
-          if (uKind == 1) {
-            // Blue daytime haze, thicker towards the limb.
-            lit += vec3(0.05, 0.11, 0.26) * diff * (0.2 + rim * 1.2);
-            // Sun glint on open ocean and a warm twilight band along the terminator.
-            float glint = max(dot(reflect(-L, n), V), 0.0);
-            float openSea = oceanMask * (1.0 - cloudCover * 0.9) * step(0.0, ndl);
-            lit += vec3(1.0, 0.93, 0.8) * (pow(glint, 70.0) * 1.6 + pow(glint, 9.0) * 0.12) * openSea;
-            // A broad, soft sheen on sunlit land as well (sharp on water, wide on land).
-            lit += vec3(1.0, 0.94, 0.84) * pow(glint, 4.0) * 0.05 * (1.0 - oceanMask) * (1.0 - cloudCover) * step(0.0, ndl);
-            lit += vec3(1.0, 0.42, 0.18) * exp(-((ndl / 0.12) * (ndl / 0.12))) * 0.07;
-          }
-          lit += mix(vec3(0.2, 1.0, 0.5), vec3(0.7, 0.3, 1.0), smoothstep(0.93, 0.965, abs(o.y))) * aurora * (1.0 - smoothstep(-0.3, -0.06, ndl)) * 0.28;
-          // Lightning deep in the night-side clouds.
-          if (uFlash.w > 0.001) {
-            float dl = 1.0 - dot(o, normalize(uFlash.xyz));
-            lit += vec3(0.75, 0.82, 1.0) * (exp(-dl * 1400.0) * 2.5 + exp(-dl * 160.0) * 0.35) * uFlash.w;
-          }
-          gl_FragColor = vec4(lit, uFade);
-        }`,
-      transparent: true,
-    });
-    const body = new THREE.Mesh(new THREE.SphereGeometry(data.size, 64, 48), material);
-    tilt.add(body);
-    const atmosphere = atmo !== '#000000' ? this.buildAtmosphere(data, atmo) : undefined;
-    if (atmosphere) pivot.add(atmosphere);
-
-    // Invisible, generous hit target so small planets are easy to point at.
-    const hit = new THREE.Mesh(
-      new THREE.SphereGeometry(Math.max(data.size * 1.7, 0.75), 12, 8),
-      new THREE.MeshBasicMaterial({ visible: false }),
-    );
-    hit.userData.index = index;
-    pivot.add(hit);
-
-    let ring: PlanetView['ring'];
-    if (data.rings) {
-      const inner = data.size * 1.3;
-      const outer = data.size * 2.35;
-      ring = new THREE.Mesh(
-        new THREE.RingGeometry(inner, outer, 160, 1),
-        new THREE.ShaderMaterial({
-          uniforms: {
-            uInner: { value: inner },
-            uOuter: { value: outer },
-            uColor: colorUniform(data.colors[2]),
-            uFade: { value: 0 },
-            uPlanetPos: { value: new THREE.Vector3() },
-            uPlanetRadius: { value: data.size },
-            uRingTex: { value: null },
-            uRingTexOn: { value: 0 },
-          },
-          vertexShader: /* glsl */ `
-            varying vec2 vLocal;
-            varying vec3 vPosW;
-            varying vec3 vNormalW;
-            void main() {
-              vLocal = position.xy;
-              vec4 w = modelMatrix * vec4(position, 1.0);
-              vPosW = w.xyz;
-              vNormalW = normalize(mat3(modelMatrix) * normal);
-              gl_Position = projectionMatrix * viewMatrix * w;
-            }`,
-          fragmentShader: /* glsl */ `
-            uniform float uInner;
-            uniform float uOuter;
-            uniform vec3 uColor;
-            uniform float uFade;
-            uniform vec3 uPlanetPos;
-            uniform float uPlanetRadius;
-            uniform sampler2D uRingTex;
-            uniform float uRingTexOn;
-            varying vec2 vLocal;
-            varying vec3 vPosW;
-            varying vec3 vNormalW;
-            void main() {
-              float r = (length(vLocal) - uInner) / (uOuter - uInner);
-              float bands = 0.55 + 0.22 * sin(r * 61.0) + 0.14 * sin(r * 147.0 + 1.0) + 0.1 * sin(r * 23.0);
-              float cassini = smoothstep(0.6, 0.62, r) * (1.0 - smoothstep(0.67, 0.69, r));
-              float alpha = bands * (1.0 - cassini * 0.92) * smoothstep(0.0, 0.05, r) * smoothstep(1.0, 0.92, r);
-              vec3 ringCol = uColor;
-              if (uRingTexOn > 0.5) {
-                // The real ring profile: colour and opacity across the radius.
-                vec4 rt = texture2D(uRingTex, vec2(clamp(r, 0.0, 1.0), 0.5));
-                ringCol = rt.rgb;
-                alpha = rt.a;
-                bands = 0.6;
-              }
-              vec3 L = normalize(-vPosW);
-              float lit = 0.3 + 0.7 * abs(dot(normalize(vNormalW), L));
-              // The planet's shadow falls across the rings on the side away from the Sun.
-              vec3 toC = uPlanetPos - vPosW;
-              float along = dot(toC, L);
-              float miss = length(toC - L * along);
-              float shadow = along > 0.0 ? smoothstep(uPlanetRadius * 0.9, uPlanetRadius * 1.05, miss) : 1.0;
-              lit *= mix(0.08, 1.0, shadow);
-              // Gaps write no depth, so depth of field sees the bands as sharp, solid matter.
-              if (alpha * uFade < 0.05) discard;
-              gl_FragColor = vec4(ringCol * lit * (0.75 + bands * 0.4), alpha * 0.85 * uFade);
-            }`,
-          transparent: true,
-          depthWrite: true,
-          side: THREE.DoubleSide,
-        }),
-      );
-      ring.rotation.x = -Math.PI / 2;
-      tilt.add(ring);
-    }
-
-    // Orbit with a glowing trail: brightest just behind the planet, fading around the loop.
-    // An open line (0..2pi) avoids interpolating the angle across the seam.
-    const segments = 320;
-    // Faint narrow ringlets (dusty, dark), seen best when lit from behind.
-    let faintRing: PlanetView['faintRing'];
-    if (data.faintRings) {
-      const fr = data.faintRings;
-      const inner = data.size * fr.inner;
-      const outer = data.size * fr.outer;
-      faintRing = new THREE.Mesh(
-        new THREE.RingGeometry(inner, outer, 160, 1),
-        new THREE.ShaderMaterial({
-          uniforms: {
-            uInner: { value: inner },
-            uOuter: { value: outer },
-            uColor: colorUniform(fr.color),
-            uOpacity: { value: fr.opacity },
-            uFade: { value: 0 },
-            uSeed: { value: index * 3.7 },
-          },
-          vertexShader: /* glsl */ `
-            varying vec2 vLocal;
-            varying vec3 vPosW;
-            void main() {
-              vLocal = position.xy;
-              vec4 w = modelMatrix * vec4(position, 1.0);
-              vPosW = w.xyz;
-              gl_Position = projectionMatrix * viewMatrix * w;
-            }`,
-          fragmentShader: /* glsl */ `
-            uniform float uInner;
-            uniform float uOuter;
-            uniform vec3 uColor;
-            uniform float uOpacity;
-            uniform float uFade;
-            uniform float uSeed;
-            varying vec2 vLocal;
-            varying vec3 vPosW;
-            void main() {
-              float r = (length(vLocal) - uInner) / (uOuter - uInner);
-              float lines = 0.0;
-              for (int i = 0; i < 5; i++) {
-                float c = fract(sin(float(i) * 12.9 + uSeed) * 437.5) * 0.9 + 0.05;
-                float w = 0.008 + 0.012 * fract(sin(float(i) * 7.1 + uSeed) * 91.3);
-                lines += exp(-(((r - c) / w) * ((r - c) / w)));
-              }
-              float haze = smoothstep(0.0, 0.2, r) * smoothstep(1.0, 0.7, r) * 0.18;
-              float a = (lines + haze) * uOpacity * uFade;
-              // Only the ringlets themselves write depth, so they stay sharp under depth of field.
-              if (a < 0.05) discard;
-              gl_FragColor = vec4(uColor, a);
-            }`,
-          transparent: true,
-          depthWrite: true,
-          side: THREE.DoubleSide,
-        }),
-      );
-      faintRing.rotation.x = -Math.PI / 2;
-      tilt.add(faintRing);
-    }
-
-    const pts: number[] = [];
-    const angles: number[] = [];
-    for (let k = 0; k <= segments; k++) {
-      const a2 = (k / segments) * Math.PI * 2;
-      pts.push(Math.cos(a2) * data.orbit, 0, -Math.sin(a2) * data.orbit);
-      angles.push(a2);
-    }
-    const orbitGeometry = new THREE.BufferGeometry();
-    orbitGeometry.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    orbitGeometry.setAttribute('aAngle', new THREE.Float32BufferAttribute(angles, 1));
-    const orbit = new THREE.Line(
-      orbitGeometry,
-      new THREE.ShaderMaterial({
-        uniforms: {
-          uOpacity: { value: 0 },
-          uPlanetAngle: { value: 0 },
-          uTint: { value: new THREE.Color(data.colors[0]).lerp(new THREE.Color('#ffffff'), 0.35) },
-          uPlanetPos: { value: new THREE.Vector3() },
-          uPlanetR: { value: data.size },
-        },
-        vertexShader: /* glsl */ `
-          attribute float aAngle;
-          varying float vAngle;
-          varying vec3 vWorld;
-          void main() {
-            vAngle = aAngle;
-            vec4 w = modelMatrix * vec4(position, 1.0);
-            vWorld = w.xyz;
-            gl_Position = projectionMatrix * viewMatrix * w;
-          }`,
-        fragmentShader: /* glsl */ `
-          uniform float uOpacity;
-          uniform float uPlanetAngle;
-          uniform vec3 uTint;
-          uniform vec3 uPlanetPos;
-          uniform float uPlanetR;
-          varying float vAngle;
-          varying vec3 vWorld;
-          void main() {
-            float behind = mod(uPlanetAngle - vAngle, 6.2831853);
-            float trail = exp(-behind * 1.5);
-            vec3 col = mix(vec3(0.6, 0.66, 0.86), uTint, trail);
-            float a = clamp(uOpacity * (0.38 + 2.4 * trail), 0.0, 1.0);
-            // The line runs through the planet's centre: let it fade out around the body,
-            // and right in front of the camera, so a close-up shows no hairline across it.
-            a *= smoothstep(uPlanetR * 1.3, uPlanetR * 7.0, distance(vWorld, uPlanetPos));
-            a *= smoothstep(uPlanetR * 2.0, uPlanetR * 9.0, distance(vWorld, cameraPosition));
-            gl_FragColor = vec4(col, a);
-          }`,
-        transparent: true,
-        depthWrite: false,
-      }),
-    );
-    // Inclined orbits (dwarf planets) live in their own tilted plane.
-    const plane = new THREE.Group();
-    plane.rotation.set(THREE.MathUtils.degToRad(data.inclination ?? 0), data.node ?? 0, 0, 'YXZ');
-    plane.add(orbit, pivot);
-    this.group.add(plane);
-    return { data, pivot, tilt, body, hit, orbit, highlight: 0, ring, faintRing, atmosphere };
-  }
 
   /** Moons: small rocky bodies orbiting in their planet's equatorial plane. */
   private buildMoons(): void {
@@ -1187,114 +247,16 @@ export class Solar implements SceneModule {
         u.uCraters.value = MOON_CRATERS[m.name] ?? 0.6;
         u.uPolarCap.value = 0;
         const mesh = new THREE.Mesh(new THREE.SphereGeometry(m.radius, 48, 32), material);
-        p.tilt.add(mesh);
+        // The Moon orbits close to the ecliptic (5°), not over Earth's equator: that is
+        // what lets eclipses happen. Other moons keep to their planet's equator.
+        (m.name === 'Місяць' ? p.pivot : p.tilt).add(mesh);
         this.moons.push({ mesh, distance: m.distance, speed: m.speed, phase: m.phase, name: m.name, parent: pi });
-        if (m.name === 'Іо') this.ioPlumes = this.buildPlumes(mesh, m.radius);
+        if (m.name === 'Іо') this.ioPlumes = buildPlumes(mesh, m.radius);
       });
     });
   }
 
-  /**
-   * Atmospheric halo: for each pixel, find how close the view ray passes to the planet
-   * and glow in a thin shell just outside the surface, brighter on the day side.
-   */
-  private buildAtmosphere(data: Planet, color: string) {
-    const outer = data.size * 1.14;
-    const material = new THREE.ShaderMaterial({
-      uniforms: {
-        uCenter: { value: new THREE.Vector3() },
-        uR: { value: data.size },
-        uColor: colorUniform(color),
-        uFade: { value: 0 },
-        uStrength: { value: data.id === 'earth' ? 1.3 : data.kind === 'rocky' ? 0.6 : 0.6 },
-        uTwilight: { value: data.id === 'earth' ? 1 : 0 },
-      },
-      vertexShader: /* glsl */ `
-        varying vec3 vPosW;
-        void main() {
-          vec4 w = modelMatrix * vec4(position, 1.0);
-          vPosW = w.xyz;
-          gl_Position = projectionMatrix * viewMatrix * w;
-        }`,
-      fragmentShader: /* glsl */ `
-        uniform vec3 uCenter;
-        uniform float uR;
-        uniform vec3 uColor;
-        uniform float uFade;
-        uniform float uStrength;
-        uniform float uTwilight;
-        varying vec3 vPosW;
-        void main() {
-          vec3 rd = normalize(vPosW - cameraPosition);
-          float t = dot(uCenter - cameraPosition, rd);
-          vec3 closest = cameraPosition + rd * t;
-          float b = length(closest - uCenter);
-          float h = clamp((b - uR) / (uR * 0.14), 0.0, 1.0);
-          float glow = pow(1.0 - h, 2.2);
-          float cosSun = dot(normalize(closest - uCenter), normalize(-uCenter));
-          float day = smoothstep(-0.35, 0.5, cosSun);
-          vec3 col = uColor * glow * (0.08 + day) * uStrength;
-          // Sunset/sunrise ring where the terminator meets the limb.
-          col += vec3(1.0, 0.45, 0.2) * glow * exp(-((cosSun / 0.22) * (cosSun / 0.22))) * uTwilight * 0.9;
-          gl_FragColor = vec4(col * uFade * 0.8, 1.0);
-        }`,
-      side: THREE.BackSide,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    return new THREE.Mesh(new THREE.SphereGeometry(outer, 48, 32), material);
-  }
-
   /** Io's volcanic plumes: umbrella-shaped fountains of sulphur rising and falling. */
-  private buildPlumes(io: THREE.Mesh, radius: number): THREE.ShaderMaterial {
-    const vents = [new THREE.Vector3(0.6, 0.7, 0.39), new THREE.Vector3(-0.55, 0.25, -0.8), new THREE.Vector3(0.1, -0.6, 0.79)].map((v) => v.normalize());
-    const per = 220;
-    const rand = mulberry32(31337);
-    const data = new Float32Array(vents.length * per * 4);
-    const dirs = new Float32Array(vents.length * per * 3);
-    let i = 0;
-    for (const n of vents) {
-      for (let k = 0; k < per; k++, i++) {
-        dirs.set([n.x, n.y, n.z], i * 3);
-        data.set([rand(), rand() * Math.PI * 2, 0.6 + rand() * 0.6, rand()], i * 4);
-      }
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(dirs, 3));
-    geometry.setAttribute('aData', new THREE.BufferAttribute(data, 4));
-    const material = additiveMaterial(
-      /* glsl */ `
-        ${POINT_SIZE}
-        uniform float uTime;
-        uniform float uR;
-        uniform float uFade;
-        attribute vec4 aData;
-        varying vec3 vColor;
-        varying float vAlpha;
-        void main() {
-          vec3 n = normalize(position);
-          vec3 t1 = normalize(cross(n, vec3(0.0, 1.0, 0.3)));
-          vec3 t2 = cross(n, t1);
-          float ph = fract(aData.x + uTime * 0.3);
-          float height = 4.0 * ph * (1.0 - ph) * uR * 1.1 * aData.z;
-          vec3 lateral = (t1 * cos(aData.y) + t2 * sin(aData.y)) * ph * uR * 0.9 * aData.z;
-          vec3 p = n * (uR + height) + lateral;
-          vec4 mv = modelViewMatrix * vec4(p, 1.0);
-          vColor = mix(vec3(1.0, 0.92, 0.6), vec3(0.6, 0.75, 1.0), ph) * 1.6;
-          vAlpha = uFade * (1.0 - ph) * 0.75;
-          gl_PointSize = min(pointSize(uR * 0.09, -mv.z, vAlpha), 6.0);
-          gl_Position = projectionMatrix * mv;
-        }`,
-      POINT_FRAG,
-      { uTime: globalUniforms.uTime, uR: { value: radius }, uFade: { value: 0 } },
-    );
-    const points = new THREE.Points(geometry, material);
-    points.frustumCulled = false;
-    io.add(points);
-    return material;
-  }
-
   private occluderWorld = new THREE.Vector3();
   private bodyQuat = new THREE.Quaternion();
 
@@ -1312,6 +274,7 @@ export class Solar implements SceneModule {
     const ws = this.zoomScale;
     if (moon) {
       set(earth.body.material, moon.mesh.getWorldPosition(this.occluderWorld), moon.mesh.geometry.parameters.radius * ws);
+      if (earth.atmosphere) set(earth.atmosphere.material, this.occluderWorld, moon.mesh.geometry.parameters.radius * ws);
     }
     if (io) set(jupiter.body.material, io.mesh.getWorldPosition(this.occluderWorld), io.mesh.geometry.parameters.radius * ws);
     // Every moon can fall into its planet's shadow.
@@ -1344,262 +307,8 @@ export class Solar implements SceneModule {
   }
 
   /** The Kuiper belt: a broad, faint, icy ring beyond Neptune. */
-  private buildKuiperBelt(): void {
-    const count = 7000;
-    const rand = mulberry32(4711);
-    const data = new Float32Array(count * 4);
-    for (let i = 0; i < count; i++) {
-      const r = lerp(KUIPER_BELT.inner, KUIPER_BELT.outer, Math.pow(rand(), 0.8));
-      data.set([r, rand() * Math.PI * 2, gaussian(rand) * (0.6 + r * 0.04), rand()], i * 4);
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
-    geometry.setAttribute('aData', new THREE.BufferAttribute(data, 4));
-    this.kuiper = additiveMaterial(
-      /* glsl */ `
-        ${POINT_SIZE}
-        uniform float uClock;
-        uniform float uFade;
-        attribute vec4 aData;
-        varying vec3 vColor;
-        varying float vAlpha;
-        void main() {
-          float r = aData.x;
-          float ang = aData.y + uClock * 0.16 * pow(7.7 / r, 1.5);
-          vec3 p = vec3(cos(ang) * r, aData.z, -sin(ang) * r);
-          vec4 mv = modelViewMatrix * vec4(p, 1.0);
-          vColor = mix(vec3(0.55, 0.62, 0.78), vec3(0.8, 0.82, 0.9), aData.w);
-          vAlpha = uFade * (0.16 + 0.2 * aData.w);
-          gl_PointSize = min(pointSize(0.05 + pow(aData.w, 5.0) * 0.08, -mv.z, vAlpha), 5.0);
-          gl_Position = projectionMatrix * mv;
-        }`,
-      POINT_FRAG,
-      { uClock: { value: 0 }, uFade: { value: 0 } },
-    );
-    const points = new THREE.Points(geometry, this.kuiper);
-    points.frustumCulled = false;
-    this.group.add(points);
-    this.unregisterExtra.push(this.ctx.quality.register(geometry, count));
-  }
-
   /** Solar wind: a thin, ceaseless outflow of particles from the Sun. */
-  private buildSolarWind(): void {
-    const count = 2600;
-    const rand = mulberry32(99173);
-    const dirs = new Float32Array(count * 3);
-    const data = new Float32Array(count * 2);
-    const v = new THREE.Vector3();
-    for (let i = 0; i < count; i++) {
-      v.randomDirection();
-      v.y *= 0.6; // denser near the ecliptic
-      v.normalize();
-      dirs.set([v.x, v.y, v.z], i * 3);
-      data.set([rand(), rand()], i * 2);
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(dirs, 3));
-    geometry.setAttribute('aData', new THREE.BufferAttribute(data, 2));
-    this.wind = additiveMaterial(
-      /* glsl */ `
-        ${POINT_SIZE}
-        uniform float uTime;
-        uniform float uFade;
-        uniform float uSun;
-        attribute vec2 aData;
-        varying vec3 vColor;
-        varying float vAlpha;
-        void main() {
-          float s = fract(aData.x + uTime * (0.025 + aData.y * 0.02));
-          float r = uSun * 1.05 + s * 30.0;
-          vec3 p = normalize(position) * r;
-          // A slight spiral: the Sun rotates while the wind flows out (Parker spiral).
-          float twist = s * 0.9;
-          p.xz = mat2(cos(twist), -sin(twist), sin(twist), cos(twist)) * p.xz;
-          vec4 mv = modelViewMatrix * vec4(p, 1.0);
-          vColor = vec3(1.0, 0.92, 0.75);
-          vAlpha = uFade * smoothstep(0.0, 0.05, s) * ((1.0 - s) * (1.0 - s)) * 0.32;
-          gl_PointSize = min(pointSize(0.05, -mv.z, vAlpha), 4.0);
-          gl_Position = projectionMatrix * mv;
-        }`,
-      POINT_FRAG,
-      { uTime: globalUniforms.uTime, uFade: { value: 0 }, uSun: { value: SUN_RADIUS } },
-    );
-    const points = new THREE.Points(geometry, this.wind);
-    points.frustumCulled = false;
-    this.group.add(points);
-  }
-
-  /**
-   * The main asteroid belt as it really is: a thick, sparse torus of dark rock (orbits tilted
-   * up to ~20°), densest near 2.7 AU, with Kirkwood gaps cleared by Jupiter's resonances,
-   * plus the two Trojan swarms that share Jupiter's orbit 60° ahead of and behind it.
-   * Each speck is lit by the Sun: bright when the Sun is behind the viewer, faint against it.
-   */
-  private buildBelt() {
-    const mainCount = 8000;
-    const trojans = 1600;
-    const count = mainCount + trojans;
-    const rand = mulberry32(99);
-    const data = new Float32Array(count * 4);
-    const extra = new Float32Array(count * 2);
-    // Semi-major axis (AU) → scene radius across the belt.
-    const AU0 = 2.1;
-    const AU1 = 3.3;
-    const toScene = (au: number) => ASTEROID_BELT.inner + ((au - AU0) / (AU1 - AU0)) * (ASTEROID_BELT.outer - ASTEROID_BELT.inner);
-    // Kirkwood gaps: 3:1, 5:2, 7:3 and 2:1 resonances with Jupiter.
-    const gaps = [2.5, 2.82, 2.95, 3.27];
-    const jupiter = PLANETS.find((p) => p.id === 'jupiter')!;
-    for (let i = 0; i < count; i++) {
-      let r: number;
-      let ang: number;
-      let incl: number;
-      let kind = 0;
-      if (i < mainCount) {
-        let au = 0;
-        do {
-          au = 2.75 + gaussian(rand) * 0.3;
-        } while (au < AU0 || au > AU1 || gaps.some((g) => Math.abs(au - g) < 0.02 + 0.015 * rand()));
-        r = toScene(au) * (1 + gaussian(rand) * 0.02);
-        ang = rand() * Math.PI * 2;
-        incl = Math.abs(gaussian(rand)) * 0.13;
-      } else {
-        // Trojans: clouds around L4 / L5, stretched along the orbit.
-        kind = 1;
-        r = jupiter.orbit * (1 + gaussian(rand) * 0.035);
-        ang = (rand() < 0.5 ? 1 : -1) * (Math.PI / 3) + gaussian(rand) * 0.32;
-        incl = Math.abs(gaussian(rand)) * 0.18;
-      }
-      // Height above the plane from the orbit's tilt and where along it the body is.
-      const node = rand() * Math.PI * 2;
-      data.set([r, ang, incl, rand()], i * 4);
-      extra.set([node, kind], i * 2);
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
-    geometry.setAttribute('aData', new THREE.BufferAttribute(data, 4));
-    geometry.setAttribute('aExtra', new THREE.BufferAttribute(extra, 2));
-    const material = new THREE.ShaderMaterial({
-      uniforms: {
-        uClock: { value: 0 },
-        uFade: { value: 0 },
-        uJupiter: { value: 0 },
-        uViewScale: globalUniforms.uViewScale,
-      },
-      vertexShader: /* glsl */ `
-        ${POINT_SIZE}
-        uniform float uClock;
-        uniform float uFade;
-        uniform float uJupiter;
-        attribute vec4 aData;
-        attribute vec2 aExtra;
-        varying vec3 vColor;
-        varying float vAlpha;
-        void main() {
-          float r = aData.x;
-          // Belt bodies follow Kepler's law; Trojans ride along with Jupiter.
-          float ang = aExtra.y > 0.5 ? uJupiter + aData.y : aData.y + uClock * 0.16 * pow(7.7 / r, 1.5);
-          float h = r * sin(aData.z) * sin(ang - aExtra.x);
-          vec3 p = vec3(cos(ang) * r, h, -sin(ang) * r);
-          vec4 mv = modelViewMatrix * vec4(p, 1.0);
-          vec3 wp = (modelMatrix * vec4(p, 1.0)).xyz;
-          // Phase lighting: full when lit from behind the viewer, a thin glint against the Sun.
-          float phase = dot(normalize(-wp), normalize(cameraPosition - wp)) * 0.5 + 0.5;
-          float lit = 0.12 + 0.88 * phase * phase;
-          // Dark carbonaceous (most), stony and the odd metallic body.
-          float k = fract(aData.w * 7.31);
-          vColor = (k < 0.68 ? vec3(0.32, 0.31, 0.3) : (k < 0.93 ? vec3(0.6, 0.5, 0.4) : vec3(0.62, 0.6, 0.58))) * lit;
-          // Steep power law: countless specks, very few large bodies.
-          float size = 0.012 + pow(aData.w, 7.0) * 0.1;
-          vAlpha = uFade * (0.25 + 0.55 * aData.w);
-          gl_PointSize = min(pointSize(size, -mv.z, vAlpha), 5.0);
-          gl_Position = projectionMatrix * mv;
-        }`,
-      fragmentShader: /* glsl */ `
-        varying vec3 vColor;
-        varying float vAlpha;
-        void main() {
-          vec2 c = gl_PointCoord * 2.0 - 1.0;
-          float d = dot(c, c);
-          if (d > 1.0) discard;
-          // Opaque little rocks, not glowing dust: normal blending, no pile-up into a band.
-          gl_FragColor = vec4(vColor, smoothstep(1.0, 0.35, d) * vAlpha);
-        }`,
-      transparent: true,
-      depthWrite: false,
-    });
-    const points = new THREE.Points(geometry, material);
-    points.frustumCulled = false;
-    this.group.add(points);
-    this.buildRocks();
-    return { material, geometry, count };
-  }
-
   /** A few dozen large, irregular, sunlit asteroids among the dust. */
-  private buildRocks(): void {
-    const rand = mulberry32(123);
-    const geo = new THREE.IcosahedronGeometry(1, 2);
-    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
-    const v = new THREE.Vector3();
-    for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i);
-      const n = Math.sin(v.x * 3.1 + 1.3) * Math.sin(v.y * 2.7 + 0.4) * Math.sin(v.z * 3.7 + 2.1);
-      v.multiplyScalar(0.8 + n * 0.35);
-      pos.setXYZ(i, v.x, v.y * 0.85, v.z);
-    }
-    geo.computeVertexNormals();
-    const count = 40;
-    const material = new THREE.ShaderMaterial({
-      uniforms: { uFade: { value: 0 } },
-      vertexShader: /* glsl */ `
-        varying vec3 vN;
-        varying vec3 vW;
-        void main() {
-          mat4 m = modelMatrix * instanceMatrix;
-          vec4 w = m * vec4(position, 1.0);
-          vW = w.xyz;
-          vN = normalize(mat3(m) * normal);
-          gl_Position = projectionMatrix * viewMatrix * w;
-        }`,
-      fragmentShader: /* glsl */ `
-        uniform float uFade;
-        varying vec3 vN;
-        varying vec3 vW;
-        void main() {
-          float diff = max(dot(normalize(vN), normalize(-vW)), 0.0);
-          gl_FragColor = vec4(vec3(0.5, 0.46, 0.42) * (0.03 + diff * 1.1), uFade);
-        }`,
-      transparent: true,
-    });
-    this.rocks = new THREE.InstancedMesh(geo, material, count);
-    this.rocks.frustumCulled = false;
-    this.rockData = Array.from({ length: count }, () => ({
-      r: lerp(ASTEROID_BELT.inner, ASTEROID_BELT.outer, rand()),
-      a: rand() * Math.PI * 2,
-      y: (rand() - 0.5) * 1.6,
-      size: 0.05 + Math.pow(rand(), 3) * 0.14,
-      spin: new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize(),
-      spinSpeed: 0.2 + rand() * 0.8,
-    }));
-    this.group.add(this.rocks);
-  }
-
-  private rockMatrix = new THREE.Matrix4();
-  private rockQuat = new THREE.Quaternion();
-  private rockPos = new THREE.Vector3();
-  private rockScale = new THREE.Vector3();
-
-  private updateRocks(clock: number, time: number, fade: number): void {
-    this.rockData.forEach((d, i) => {
-      const ang = d.a + clock * 0.16 * Math.pow(7.7 / d.r, 1.5);
-      this.rockPos.set(Math.cos(ang) * d.r, d.y, -Math.sin(ang) * d.r);
-      this.rockQuat.setFromAxisAngle(d.spin, time * d.spinSpeed);
-      this.rockScale.setScalar(d.size);
-      this.rockMatrix.compose(this.rockPos, this.rockQuat, this.rockScale);
-      this.rocks.setMatrixAt(i, this.rockMatrix);
-    });
-    this.rocks.instanceMatrix.needsUpdate = true;
-    this.rocks.material.uniforms.uFade.value = fade;
-  }
 
   // ---------------------------------------------------------------- lifecycle
 
@@ -1680,24 +389,42 @@ export class Solar implements SceneModule {
     this.milkyWay.opacity = (0.03 + ease * 0.09) * this.skyFade;
     this.milkyWay.mesh.position.copy(cam.position);
     this.starfield.position.copy(cam.position);
+    this.brightStars.group.position.copy(cam.position);
+    this.brightStars.opacity = (0.55 + 0.45 * ease) * this.skyFade;
+    this.figuresWeight += ((this.figuresOn && this.interactive ? 1 : 0) - this.figuresWeight) * Math.min(1, (dt || 1 / 60) * 3);
+    this.brightStars.figures = this.figuresWeight * this.skyFade;
     this.sky.visible = this.skyFade > 0.002;
     this.corona.quaternion.copy(cam.quaternion);
     this.belt.uniforms.uClock.value = clock;
+    if (this.ringChunks) {
+      const saturn = this.planets.find((p) => p.data.id === 'saturn')!;
+      this.ringChunks.uniforms.uClock.value = clock;
+      this.ringChunks.uniforms.uFade.value = ease;
+      this.ringChunks.uniforms.uNear.value = saturn.data.size * 3.2 * this.zoomScale;
+    }
     this.belt.uniforms.uJupiter.value = planetAngle(PLANETS.find((p) => p.id === 'jupiter')!, clock);
     this.belt.uniforms.uFade.value = ease;
     this.kuiper.uniforms.uClock.value = clock;
     this.kuiper.uniforms.uFade.value = ease;
     this.wind.uniforms.uFade.value = ease;
-    this.updateRocks(clock, globalUniforms.uTime.value, ease);
+    this.rocks.update(clock, globalUniforms.uTime.value, ease);
     (this.starfield.material as THREE.ShaderMaterial).uniforms.uOpacity.value = (0.55 + 0.25 * ease) * this.skyFade;
 
-    if (this.zoomed || this.comparing) {
+    if (this.zoomed || this.comparing || this.portal) {
       if (this.hoveredIndex >= 0) {
         this.hoveredIndex = -1;
         this.onHover(null);
       }
+      this.setWormholeHover(false);
     } else {
       this.updateHover();
+    }
+    this.wormhole.update(dt, cam, this.interactive && !this.comparing ? ease : 0, this.wormholeHovered);
+    // The mouth hums when we come close (left to the passage's own sound once we fall in).
+    const near = this.interactive && !this.portal ? 1 - THREE.MathUtils.smoothstep(cam.position.distanceTo(this.wormhole.group.getWorldPosition(this.wpos)) / this.wormhole.throat, 4, 40) : 0;
+    if (Math.abs(near - this.humLevel) > 0.02 || (near === 0 && this.humLevel !== 0)) {
+      this.humLevel = near;
+      this.ctx.audio.throatHum(near);
     }
     const ws = this.zoomScale;
 
@@ -1706,6 +433,7 @@ export class Solar implements SceneModule {
       const a = m.phase + clock * m.speed;
       m.mesh.position.set(Math.cos(a) * m.distance, 0, -Math.sin(a) * m.distance);
       m.mesh.material.uniforms.uFade.value = ease;
+      m.mesh.material.uniforms.uBump.value = m.mesh.geometry.parameters.radius * this.zoomScale * BUMP;
     }
 
     this.planets.forEach((p, i) => {
@@ -1718,7 +446,10 @@ export class Solar implements SceneModule {
       p.highlight += (target - p.highlight) * Math.min(1, (dt || 1 / 60) * 8);
       p.body.material.uniforms.uHighlight.value = p.highlight * 0.8;
       p.body.material.uniforms.uFade.value = ease;
-      if (p.faintRing) p.faintRing.material.uniforms.uFade.value = ease;
+      // Rocky bodies with a map get relief; its scale follows their size on screen.
+      p.body.material.uniforms.uBump.value = p.data.kind === 'rocky' && p.data.id !== 'venus' ? p.data.size * ws * BUMP : 0;
+      // Jupiter's, Uranus's and Neptune's ringlets are very faint in reality.
+      if (p.faintRing) p.faintRing.material.uniforms.uFade.value = ease * 0.4;
       // Lighting helpers work in world space, so they follow the zoom scale too.
       const world = p.pivot.getWorldPosition(this.wpos);
       if (p.atmosphere) {
@@ -1756,6 +487,7 @@ export class Solar implements SceneModule {
     if (!this.interactive) return;
     if (this.zoomed) {
       this.stopTour();
+      if (this.show) this.endShow(false);
       this.comet.group.visible = false;
       this.controls.autoRotate = false;
       this.controls.update();
@@ -1775,8 +507,133 @@ export class Solar implements SceneModule {
     this.controls.autoRotateSpeed = 0.35;
     if (!this.tour.on && this.focusedIndex < 0 && this.idle > TOUR_AFTER) this.startTour(true);
     this.updateTour(dt);
+    if (this.show) {
+      this.idle = 0;
+      this.controls.autoRotate = false;
+      this.updateShow(dt);
+      return;
+    }
+    if (this.portal) {
+      this.idle = 0;
+      this.controls.autoRotate = false;
+      this.updatePortal(dt);
+      return;
+    }
     this.updateFocus();
     this.controls.update();
+  }
+
+  // ---------------------------------------------------------------- the wormhole
+
+  private setWormholeHover(on: boolean): void {
+    if (on === this.wormholeHovered) return;
+    this.wormholeHovered = on;
+    this.onWormholeHover(on);
+  }
+
+  /** Flies the camera into the wormhole; onWormhole fires once its mouth fills the view. */
+  enterWormhole(): void {
+    if (!this.interactive || this.portal || this.zoomed || this.comparing) return;
+    const cam = this.ctx.camera;
+    this.stopTour();
+    if (this.show) this.endShow(false);
+    this.focusTween?.kill();
+    // Coming back, land in the overview rather than in a planet close-up.
+    const back = this.focusedIndex >= 0 && this.overviewPose
+      ? { pos: this.overviewPose.pos.clone(), target: this.overviewPose.target.clone() }
+      : { pos: cam.position.clone(), target: this.controls.target.clone() };
+    if (this.focusedIndex >= 0) {
+      this.focusedIndex = -1;
+      this.overviewPose = null;
+      this.focus = { t: 1, following: false };
+      this.onFocus(null);
+    }
+    this.controls.enabled = false;
+    this.focusFrom.pos.copy(cam.position);
+    this.focusFrom.target.copy(this.controls.target);
+    // Reach the mouth still moving, at the speed the passage on the far side sets off at.
+    const W = this.wormhole.group.getWorldPosition(this.wpos);
+    const dist = Math.max(cam.position.distanceTo(W) - this.wormhole.throat * PORTAL_RC, 1e-3);
+    const s1 = Math.min(2.5, (PASSAGE_SPEED * this.wormhole.throat * PORTAL_FLIGHT) / dist);
+    this.portal = { t: 0, fired: false, dir: 'in', back, s0: s1 };
+    this.setWormholeHover(false);
+  }
+
+  private updatePortal(dt: number): void {
+    const p = this.portal!;
+    const cam = this.ctx.camera;
+    p.t += dt;
+    const W = this.wormhole.group.getWorldPosition(this.tmp);
+    cam.up.set(0, 1, 0);
+    if (p.dir === 'out') {
+      // Out of the wormhole, looking away from it, then round to the view we left: already
+      // moving at the speed we came through at, so there is no halt at the hand-over.
+      const k = hermite(Math.min(1, p.t / PORTAL_BACK), p.s0 ?? 0, 0);
+      cam.position.lerpVectors(this.focusFrom.pos, p.back.pos, k);
+      this.controls.target.lerpVectors(this.focusFrom.target, p.back.target, smoothstep5(Math.min(1, p.t / (PORTAL_BACK * 0.8))));
+      cam.lookAt(this.controls.target);
+      if (p.t >= PORTAL_BACK) {
+        this.portal = null;
+        this.controls.minDistance = OVERVIEW_LIMITS.min;
+        this.controls.maxDistance = OVERVIEW_LIMITS.max;
+        this.controls.enabled = true;
+        this.controls.update();
+        this.idle = 0;
+      }
+      return;
+    }
+    // Turn to face it first, then fall in, slowly at first and faster as it grows.
+    this.controls.target.lerpVectors(this.focusFrom.target, W, smooth(0, 0.9, p.t));
+    const end = this.wpos.copy(this.focusFrom.pos).sub(W).normalize().multiplyScalar(this.wormhole.throat * PORTAL_RC).add(W);
+    cam.position.lerpVectors(this.focusFrom.pos, end, hermite(Math.min(1, p.t / PORTAL_FLIGHT), 0, p.s0 ?? 0));
+    cam.lookAt(this.controls.target);
+    // The other side picks up from exactly this view, so the hand-over shows no seam.
+    if (!p.fired && p.t >= PORTAL_FLIGHT) {
+      p.fired = true;
+      this.onWormhole();
+    }
+  }
+
+  /** The camera's pose as it reaches the wormhole: orientation, and l in throat radii. */
+  get portalEntry(): { quat: THREE.Quaternion; lc: number } {
+    return { quat: this.ctx.camera.quaternion.clone(), lc: Math.sqrt(PORTAL_RC * PORTAL_RC - 1) };
+  }
+
+  /** Way out of the wormhole on our side: towards the view we left it from. */
+  private exitDir(out: THREE.Vector3): THREE.Vector3 {
+    const W = this.wormhole.group.getWorldPosition(this.wpos);
+    const back = this.portal?.back.pos ?? this.ctx.camera.position;
+    return out.copy(back).sub(W).normalize();
+  }
+
+  /** Orientation of a camera leaving the wormhole on our side (looking away from it). */
+  get portalExit(): THREE.Quaternion {
+    const out = this.exitDir(new THREE.Vector3());
+    const m = new THREE.Matrix4().lookAt(new THREE.Vector3(), out.negate(), new THREE.Vector3(0, 1, 0));
+    return new THREE.Quaternion().setFromRotationMatrix(m);
+  }
+
+  /**
+   * Back from the other side: the camera comes out of the wormhole `rc` throat radii from
+   * its centre, looking away from it, and flies back to the view we left from — setting off
+   * at `speed` (throat radii a second), the speed it came through the wormhole at.
+   */
+  returnFromWormhole(rc: number, speed = 0): void {
+    const p = this.portal;
+    if (!p) return;
+    const cam = this.ctx.camera;
+    const out = this.exitDir(new THREE.Vector3());
+    const W = this.wormhole.group.getWorldPosition(new THREE.Vector3());
+    cam.position.copy(W).addScaledVector(out, this.wormhole.throat * rc);
+    cam.up.set(0, 1, 0);
+    this.focusFrom.pos.copy(cam.position);
+    this.focusFrom.target.copy(cam.position).addScaledVector(out, 6);
+    cam.lookAt(this.focusFrom.target);
+    this.controls.target.copy(this.focusFrom.target);
+    p.dir = 'out';
+    p.t = 0;
+    const path = cam.position.distanceTo(p.back.pos) / this.wormhole.throat;
+    p.s0 = path > 1e-3 ? Math.min(2.5, (speed * PORTAL_BACK) / path) : 0;
   }
 
   /**
@@ -1827,6 +684,10 @@ export class Solar implements SceneModule {
       const hits = this.raycaster.intersectObjects(this.planets.map((p) => p.hit), false);
       if (hits.length) index = hits[0].object.userData.index as number;
     }
+    // The wormhole answers only when no planet is under the pointer.
+    const onWormhole =
+      index < 0 && this.interactive && pointer.inside && this.wormhole.group.visible && this.raycaster.intersectObject(this.wormhole.hit, false).length > 0;
+    this.setWormholeHover(onWormhole);
     if (index !== this.hoveredIndex) {
       this.hoveredIndex = index;
       this.onHover(index >= 0 ? this.planets[index].data : null);
@@ -1846,7 +707,7 @@ export class Solar implements SceneModule {
   }
 
   get wantsPointer(): boolean {
-    return this.hoveredIndex >= 0;
+    return this.hoveredIndex >= 0 || this.wormholeHovered;
   }
 
   private buildDrift(): void {
@@ -1863,6 +724,21 @@ export class Solar implements SceneModule {
     this.drift = new GalacticDrift(['#ffcf7a', ...main.map((p) => p.data.colors[0])], earthSpeed * DRIFT_SPEED_RATIO, dir);
     this.driftBodies = [new THREE.Vector3(), ...main.map(() => new THREE.Vector3())];
     this.group.add(this.drift.group);
+  }
+
+  get constellations(): boolean {
+    return this.figuresOn;
+  }
+
+  setConstellations(on: boolean): void {
+    this.figuresOn = on;
+  }
+
+  /** Names of bright stars and constellations, as world positions (follow the camera). */
+  skyLabels(out: { pos: THREE.Vector3; text: string; kind: 'star' | 'constellation' }[]): void {
+    out.length = 0;
+    const origin = this.brightStars.group.position;
+    for (const l of this.brightStars.labels) out.push({ pos: this.tmp.copy(l.pos).add(origin).clone(), text: l.text, kind: l.kind });
   }
 
   get drifting(): boolean {
@@ -1953,6 +829,8 @@ export class Solar implements SceneModule {
           t.wrapS = THREE.ClampToEdgeWrapping;
           ru.uRingTex.value = t;
           ru.uRingTexOn.value = 1;
+          u.uRingMap.value = t;
+          u.uRingMapOn.value = 1;
         });
       }
     }
@@ -2124,6 +1002,135 @@ export class Solar implements SceneModule {
     this.idle = 0;
   }
 
+  // ---------------------------------------------------------------- eclipses and the comet
+
+  get showing(): 'solar' | 'lunar' | 'comet' | null {
+    return this.show?.kind ?? null;
+  }
+
+  /**
+   * Sets up an eclipse right now: the Moon is placed just before the line through the Sun
+   * and Earth (between them for a solar eclipse, behind Earth for a lunar one), time slows,
+   * and the camera watches from where it looks best.
+   */
+  startEclipse(kind: 'solar' | 'lunar'): void {
+    const moon = this.moons.find((m) => m.name === 'Місяць');
+    const earth = this.planets.find((p) => p.data.id === 'earth');
+    if (!moon || !earth || !this.beginShow(kind)) return;
+    const toSun = earth.pivot.position.clone().negate().normalize();
+    const aSun = Math.atan2(-toSun.z, toSun.x);
+    const target = kind === 'solar' ? aSun : aSun + Math.PI;
+    // ~6 s until the alignment, then a slow pass through it.
+    moon.phase = target - 0.32 - this.ctx.orbitClock.t * moon.speed;
+    this.orbitSpeed = 0.045;
+  }
+
+  /** Brings a comet in now (if none is passing) and rides along beside its head. */
+  followComet(): void {
+    if (!this.comet.flying) this.comet.launch();
+    if (this.beginShow('comet')) this.comet.timeScale = 0.3;
+  }
+
+  private beginShow(kind: 'solar' | 'lunar' | 'comet'): boolean {
+    if (!this.interactive || this.zoomed || this.comparing) return false;
+    if (this.show) this.endShow(false);
+    this.stopTour();
+    if (this.drift.active) this.setDrift(false, false);
+    this.focusTween?.kill();
+    this.showTween?.kill();
+    const cam = this.ctx.camera;
+    let pose = { pos: cam.position.clone(), target: this.controls.target.clone() };
+    if (this.focusedIndex >= 0) {
+      if (this.overviewPose) pose = this.overviewPose;
+      this.focusedIndex = -1;
+      this.overviewPose = null;
+      this.focus = { t: 1, following: false };
+      this.controls.minDistance = OVERVIEW_LIMITS.min;
+      this.controls.maxDistance = OVERVIEW_LIMITS.max;
+      this.onFocus(null);
+    }
+    this.show = { kind, t: 0, pose, from: { pos: cam.position.clone(), target: this.controls.target.clone() }, speed: this.orbitSpeed };
+    this.controls.enabled = false;
+    this.controls.minDistance = 0.1;
+    this.onShow(kind);
+    return true;
+  }
+
+  /** Ends a close-up and flies back to where the user was. */
+  endShow(fly = true): void {
+    const show = this.show;
+    if (!show) return;
+    this.show = null;
+    this.orbitSpeed = show.speed;
+    this.comet.timeScale = 1;
+    this.controls.minDistance = OVERVIEW_LIMITS.min;
+    this.idle = 0;
+    this.onShow(null);
+    const cam = this.ctx.camera;
+    if (!fly) {
+      this.controls.enabled = true;
+      return;
+    }
+    const from = { pos: cam.position.clone(), target: this.controls.target.clone() };
+    const to = show.pose;
+    const k = { t: 0 };
+    this.showTween = gsap.to(k, {
+      t: 1,
+      duration: this.ctx.reducedMotion ? 0.9 : 1.8,
+      ease: 'power2.inOut',
+      onUpdate: () => {
+        cam.position.lerpVectors(from.pos, to.pos, k.t);
+        this.controls.target.lerpVectors(from.target, to.target, k.t);
+        cam.lookAt(this.controls.target);
+      },
+      onComplete: () => {
+        this.controls.enabled = true;
+      },
+    });
+  }
+
+  private updateShow(dt: number): void {
+    const show = this.show;
+    if (!show) return;
+    show.t += dt;
+    const cam = this.ctx.camera;
+    const up = this.tmp.set(0, 1, 0).clone();
+    const pos = new THREE.Vector3();
+    const target = new THREE.Vector3();
+    const ws = this.zoomScale;
+    if (show.kind === 'comet') {
+      if (!this.comet.flying || show.t > 40) return this.endShow();
+      const head = this.comet.headPosition.clone().multiplyScalar(ws);
+      const tail = this.comet.tailDirection;
+      const side = new THREE.Vector3().crossVectors(tail, up).normalize();
+      pos.copy(head).addScaledVector(side, 3.4).addScaledVector(up, 0.9).addScaledVector(tail, -0.8);
+      target.copy(head).addScaledVector(tail, 0.9);
+    } else {
+      if (show.t > 18) return this.endShow();
+      const earth = this.planets.find((p) => p.data.id === 'earth')!;
+      const moon = this.moons.find((m) => m.name === 'Місяць')!;
+      const E = earth.pivot.getWorldPosition(new THREE.Vector3());
+      const M = moon.mesh.getWorldPosition(new THREE.Vector3());
+      const toSun = E.clone().negate().normalize();
+      const side = new THREE.Vector3().crossVectors(toSun, up).normalize();
+      if (show.kind === 'solar') {
+        // From the Sun's side: the Moon's dark disk and its shadow sliding over the day side.
+        pos.copy(E).addScaledVector(toSun, 2.1).addScaledVector(side, 0.75).addScaledVector(up, 0.45);
+        target.copy(E).addScaledVector(toSun, 0.25);
+      } else {
+        // From just above Earth's night side, looking at the Moon as it enters the shadow.
+        pos.copy(E).addScaledVector(toSun, -0.62).addScaledVector(side, 0.06).addScaledVector(up, 0.14);
+        target.copy(M);
+      }
+    }
+    // Ease in from wherever the camera was.
+    const k = THREE.MathUtils.smoothstep(show.t, 0, 2);
+    cam.position.lerpVectors(show.from.pos, pos, k);
+    this.controls.target.lerpVectors(show.from.target, target, k);
+    cam.up.set(0, 1, 0);
+    cam.lookAt(this.controls.target);
+  }
+
   // ---------------------------------------------------------------- guided tour
 
   get touring(): boolean {
@@ -2282,6 +1289,7 @@ export class Solar implements SceneModule {
   private onActivity = (e: Event) => {
     this.idle = 0;
     // A self-started tour gives way to any movement; one the user asked for, to a click or wheel.
+    if (this.show && e.type === 'wheel') this.endShow();
     if (this.tour.on && (this.tour.auto || e.type === 'wheel')) {
       this.stopTour();
       if (this.tour.auto) this.unfocus();
@@ -2291,6 +1299,7 @@ export class Solar implements SceneModule {
   private onPointerDown = (e: PointerEvent) => {
     this.idle = 0;
     this.stopTour();
+    if (this.show) this.endShow();
     this.downAt = { x: e.clientX, y: e.clientY, t: performance.now() };
   };
 
@@ -2298,7 +1307,9 @@ export class Solar implements SceneModule {
     if (!this.interactive || this.zoomed || this.comparing || e.button !== 0) return;
     const moved = Math.hypot(e.clientX - this.downAt.x, e.clientY - this.downAt.y);
     if (moved > 6 || performance.now() - this.downAt.t > 600) return; // that was a drag
+    if (this.portal) return;
     if (this.hoveredIndex >= 0) this.focusPlanet(this.hoveredIndex);
+    else if (this.wormholeHovered) this.enterWormhole();
     else if (this.focusedIndex >= 0) this.unfocus();
   };
 
@@ -2314,6 +1325,8 @@ export class Solar implements SceneModule {
     this.stopTour();
     if (this.drift.active) this.setDrift(false, false);
     this.driftTween?.kill();
+    if (this.show) this.endShow(false);
+    this.showTween?.kill();
     this.drift.reset();
     if (this.comparing) this.setCompare(false);
     this.controls.enabled = false;
@@ -2322,6 +1335,8 @@ export class Solar implements SceneModule {
     if (this.focusedIndex >= 0) this.onFocus(null);
     this.hoveredIndex = -1;
     this.focusedIndex = -1;
+    this.setWormholeHover(false);
+    this.portal = null;
   }
 
   applyConfig(): void {
@@ -2335,9 +1350,20 @@ export class Solar implements SceneModule {
     this.unregisterExtra.forEach((u) => u());
     this.controls.dispose();
     this.noiseCube.dispose();
+    this.brightStars.dispose();
     this.drift.dispose();
     this.milkyWay.dispose();
     disposeObject(this.sky);
     disposeObject(this.group);
   }
+}
+
+/** Quintic ease (zero speed and acceleration at both ends). */
+/** Cubic easing from 0 to 1 with slopes s0 at the start and s1 at the end. */
+function hermite(x: number, s0: number, s1: number): number {
+  return ((s0 + s1 - 2) * x + (3 - 2 * s0 - s1)) * x * x + s0 * x;
+}
+
+function smoothstep5(k: number): number {
+  return k * k * k * (k * (k * 6 - 15) + 10);
 }

@@ -364,6 +364,8 @@ export class CosmicZoom implements SceneModule {
   private homeTween: gsap.core.Tween | null = null;
 
   private levels: LevelView[] = [];
+  /** Set while another scene has the screen (and the wheel). */
+  suspended = false;
   /** «Політ» at cosmic scales: everything here is moving too. */
   motion = false;
   onMotion: (on: boolean) => void = () => {};
@@ -636,7 +638,7 @@ export class CosmicZoom implements SceneModule {
       lines: [],
       labels: [
         { pos: new THREE.Vector3(0, 0, 0), text: 'Ви тут', sub: 'рукав Оріона', kind: 'home' },
-        { pos: center.clone(), text: 'Центр Галактики', sub: '26 000 св. р.', kind: 'object', left: true },
+        { pos: center.clone(), text: 'Центр Галактики', sub: '26 000 св. р. · чорна діра Стрілець A*', kind: 'object', left: true },
         { pos: new THREE.Vector3(-Math.cos(3.648), 0, -Math.sin(3.648)).multiplyScalar(1.34), text: 'Туманність Оріона', sub: '1 340 св. р.', kind: 'object', zRange: [1.35, 1.8] },
         { pos: new THREE.Vector3(-Math.cos(0.297), 0, -Math.sin(0.297)).multiplyScalar(5.7), text: 'Туманність Орел', sub: '5 700 св. р.', kind: 'object', left: true },
         { pos: new THREE.Vector3(-Math.cos(5.019), 0, -Math.sin(5.019)).multiplyScalar(8.5), text: 'Туманність Кіля', sub: '8 500 св. р.', kind: 'object' },
@@ -950,7 +952,7 @@ export class CosmicZoom implements SceneModule {
   /** Wheel past the Solar System's zoom limit (or any wheel while zoomed) drives the zoom. */
   private onWheel = (e: WheelEvent) => {
     const solar = this.solar();
-    if (!this.active || !solar.isInteractive || solar.focusedIndex >= 0 || solar.comparing) return;
+    if (!this.active || this.suspended || !solar.isInteractive || solar.focusedIndex >= 0 || solar.comparing) return;
     const controls = solar.orbitControls;
     const dist = this.ctx.camera.position.distanceTo(controls.target);
     const zoomMode = this.target > 0 || this.z > 0.001;
@@ -1105,6 +1107,7 @@ export class CosmicZoom implements SceneModule {
       // Keep the camera at a fixed distance from a focus that glides from the Sun to
       // the galactic centre and on to the Local Group; the user can still orbit.
       this.focusPoint(this.z, this.focus).multiplyScalar(VIEW / P);
+
       this.dist += (VIEW - this.dist) * Math.min(1, (dt || 1 / 60) * 2.5);
       const dir = this.tmp.subVectors(cam.position, this.lastTarget);
       if (dir.lengthSq() < 1e-8) dir.set(0, 0.4, 1);

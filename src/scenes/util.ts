@@ -128,6 +128,32 @@ export function disposeObject(root: THREE.Object3D): void {
  * The Milky Way seen from inside: a faint band with a bright bulge and a dark dust
  * rift. Baked once into an equirectangular texture, then drawn on a sky sphere.
  */
+/**
+ * Galactic frame in the Solar System's coordinates: the Galaxy's plane is tilted 60° to the
+ * planets' orbits, and the Sun's motion (towards Cygnus, l = 90°) lies in it along the same
+ * direction «Політ» uses. x: towards the galactic centre, y: l = 90°, n: north galactic pole.
+ */
+export const GALACTIC = (() => {
+  const y = new THREE.Vector3(Math.cos(Math.PI / 3), Math.sin(Math.PI / 3), 0);
+  const n = new THREE.Vector3(-Math.sin(Math.PI / 3), Math.cos(Math.PI / 3), 0);
+  return { x: new THREE.Vector3().crossVectors(y, n), y, n };
+})();
+
+/** The photographic sky panorama once loaded (shared with scenes that lens it). */
+export const SKY: { photo: THREE.Texture | null } = { photo: null };
+
+/** Equatorial J2000 (RA, Dec in degrees) to a unit direction in the scene, via galactic coordinates. */
+export function equatorialToScene(raDeg: number, decDeg: number, out = new THREE.Vector3()): THREE.Vector3 {
+  const ra = THREE.MathUtils.degToRad(raDeg);
+  const dec = THREE.MathUtils.degToRad(decDeg);
+  const e = [Math.cos(dec) * Math.cos(ra), Math.cos(dec) * Math.sin(ra), Math.sin(dec)];
+  // IAU J2000 equatorial → galactic rotation.
+  const gx = -0.0548755604 * e[0] - 0.8734370902 * e[1] - 0.4838350155 * e[2];
+  const gy = 0.4941094279 * e[0] - 0.44482963 * e[1] + 0.7469822445 * e[2];
+  const gz = -0.867666149 * e[0] - 0.1980763734 * e[1] + 0.4559837762 * e[2];
+  return out.set(0, 0, 0).addScaledVector(GALACTIC.x, gx).addScaledVector(GALACTIC.y, gy).addScaledVector(GALACTIC.n, gz);
+}
+
 export function createMilkyWay(renderer: THREE.WebGLRenderer, radius = 280) {
   const target = new THREE.WebGLRenderTarget(2048, 1024, { type: THREE.HalfFloatType });
   const bakeScene = new THREE.Scene();
@@ -168,9 +194,7 @@ export function createMilkyWay(renderer: THREE.WebGLRenderer, radius = 280) {
   // Galactic frame in the Solar System's coordinates: the Galaxy's plane is tilted 60° to
   // the planets' orbits, and the Sun's motion (towards Cygnus, l = 90°) lies in that plane
   // along the same direction as «Політ» uses. X: towards the galactic centre, N: north pole.
-  const galY = new THREE.Vector3(Math.cos(Math.PI / 3), Math.sin(Math.PI / 3), 0);
-  const galN = new THREE.Vector3(-Math.sin(Math.PI / 3), Math.cos(Math.PI / 3), 0);
-  const galX = new THREE.Vector3().crossVectors(galY, galN);
+  const { x: galX, y: galY, n: galN } = GALACTIC;
 
   const material = new THREE.ShaderMaterial({
     uniforms: {
@@ -204,10 +228,11 @@ export function createMilkyWay(renderer: THREE.WebGLRenderer, radius = 280) {
         vec3 col;
         if (uPhotoOn > 0.5) {
           // The real sky (Solar System Scope panorama, galactic coordinates: the centre of
-          // the Galaxy in the middle, longitude growing to the left).
+          // the Galaxy in the middle, longitude growing to the left, north at the bottom of
+          // the image; checked by matching the bright stars of the catalogue to the photo).
           float l = atan(dot(d, uGalY), dot(d, uGalX));
           float b = asin(clamp(dot(d, uGalN), -1.0, 1.0));
-          vec2 uv = vec2(fract(0.5 - l / 6.2831853), 0.5 + b / 3.1415927);
+          vec2 uv = vec2(fract(0.5 - l / 6.2831853), 0.5 - b / 3.1415927);
           vec3 sky = texture2D(uPhoto, uv).rgb;
           // The photo is very dark: lift the faint band, but subtract the floor first so the
           // empty sky stays black.
@@ -243,6 +268,7 @@ export function createMilkyWay(renderer: THREE.WebGLRenderer, radius = 280) {
       photo.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
       photo.needsUpdate = true;
       material.uniforms.uPhoto.value = photo;
+      SKY.photo = photo;
       material.uniforms.uPhotoOn.value = 1;
     } catch (err) {
       console.warn('Milky Way panorama failed to load; keeping the procedural band.', err);

@@ -1,4 +1,14 @@
 /** The static boot screen from index.html: progress while the app downloads, builds and compiles. */
+import { lang, tr } from './i18n';
+
+/** The page's own texts (title, boot screen) in the chosen language. */
+export function localizePage(): void {
+  document.documentElement.lang = lang;
+  document.title = tr('Народження Всесвіту');
+  const boot = document.getElementById('boot');
+  const title = boot?.firstElementChild;
+  if (title && !title.className) title.textContent = tr('Народження Всесвіту');
+}
 
 export function setBoot(fraction: number, label?: string): void {
   const boot = document.getElementById('boot');
@@ -6,7 +16,7 @@ export function setBoot(fraction: number, label?: string): void {
   boot.style.setProperty('--p', String(Math.max(0, Math.min(1, fraction))));
   boot.classList.add('is-determinate');
   const text = boot.querySelector('.boot__label');
-  if (label && text) text.textContent = label;
+  if (label && text) text.textContent = tr(label);
 }
 
 export function hideBoot(): void {

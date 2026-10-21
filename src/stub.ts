@@ -1,4 +1,5 @@
 /** Lightweight fallback page for phones, tablets and browsers without WebGL2. No Three.js here. */
+import { tr } from './i18n';
 
 const TEXT = {
   mobile: {
@@ -12,21 +13,21 @@ const TEXT = {
 } as const;
 
 export function showStub(root: HTMLElement, reason: 'mobile' | 'webgl'): void {
-  const text = TEXT[reason];
+  const text = { title: tr(TEXT[reason].title), subtitle: tr(TEXT[reason].subtitle) };
   root.innerHTML = `
     <div class="stub">
       <canvas class="stub__stars" aria-hidden="true"></canvas>
       <main class="stub__content">
         <h1 class="stub__title">${text.title}</h1>
         <p class="stub__subtitle">${text.subtitle}</p>
-        <button class="stub__button" type="button">Скопіювати посилання</button>
+        <button class="stub__button" type="button">${tr('Скопіювати посилання')}</button>
       </main>
     </div>`;
 
   const button = root.querySelector<HTMLButtonElement>('.stub__button')!;
   button.addEventListener('click', async () => {
     const ok = await copyText(location.href);
-    button.textContent = ok ? 'Скопійовано ✓' : 'Не вдалося скопіювати';
+    button.textContent = tr(ok ? 'Скопійовано ✓' : 'Не вдалося скопіювати');
     button.classList.add('is-done');
     window.setTimeout(() => {
       button.textContent = 'Скопіювати посилання';

@@ -436,6 +436,263 @@ export class AudioEngine {
     }, 3200);
   }
 
+  /**
+   * Through a wormhole: pressure building to the throat (a sub swell, a rising roar and a
+   * glassy whistle sweeping up), then let go on the far side.
+   */
+  wormhole(seconds: number): void {
+    if (!this.ctx || !this.cuesEnabled) return;
+    const ctx = this.ctx;
+    const t = this.now();
+    const mid = t + seconds * 0.45;
+    const end = t + seconds;
+    window.clearInterval(this.sparkleTimer);
+    this.ramp(this.padGain.gain, 0, seconds * 0.4);
+
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(32, t);
+    sub.frequency.exponentialRampToValueAtTime(58, mid);
+    sub.frequency.exponentialRampToValueAtTime(30, end);
+    const sg = ctx.createGain();
+    sg.gain.setValueAtTime(0.0001, t);
+    sg.gain.exponentialRampToValueAtTime(0.7, mid);
+    sg.gain.exponentialRampToValueAtTime(0.0001, end);
+    sub.connect(sg).connect(this.master);
+    sub.start(t);
+    sub.stop(end + 0.1);
+
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.noiseBuffer;
+    noise.loop = true;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = 1.2;
+    lp.frequency.setValueAtTime(90, t);
+    lp.frequency.exponentialRampToValueAtTime(1100, mid);
+    lp.frequency.exponentialRampToValueAtTime(140, end);
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, t);
+    ng.gain.exponentialRampToValueAtTime(0.55, mid);
+    ng.gain.exponentialRampToValueAtTime(0.0001, end);
+    noise.connect(lp).connect(ng);
+    ng.connect(this.master);
+    ng.connect(this.reverbSend);
+    noise.start(t);
+    noise.stop(end + 0.1);
+
+    const whistle = ctx.createBufferSource();
+    whistle.buffer = this.noiseBuffer;
+    whistle.loop = true;
+    whistle.playbackRate.value = 2;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 18;
+    bp.frequency.setValueAtTime(300, t);
+    bp.frequency.exponentialRampToValueAtTime(2400, mid);
+    bp.frequency.exponentialRampToValueAtTime(600, end);
+    const wg = ctx.createGain();
+    wg.gain.setValueAtTime(0.0001, t);
+    wg.gain.exponentialRampToValueAtTime(0.12, mid);
+    wg.gain.exponentialRampToValueAtTime(0.0001, end);
+    whistle.connect(bp).connect(wg);
+    wg.connect(this.master);
+    wg.connect(this.reverbSend);
+    whistle.start(t);
+    whistle.stop(end + 0.1);
+  }
+
+  private garg: { gain: GainNode; filter: BiquadFilterNode; bright: GainNode; nodes: AudioScheduledSourceNode[] } | null = null;
+  private gargBright = false;
+
+  /**
+   * Near Gargantua: a slow, dark drone (two low tones beating against each other, and a
+   * breath of filtered noise) in place of the Solar System's ambience.
+   */
+  gargantua(on: boolean): void {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    if (on && !this.garg) {
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 260;
+      filter.Q.value = 0.8;
+      filter.connect(gain);
+      gain.connect(this.master);
+      gain.connect(this.reverbSend);
+      const nodes: AudioScheduledSourceNode[] = [];
+      for (const [f, level, type] of [
+        [36.7, 0.5, 'sine'],
+        [37.2, 0.35, 'sine'],
+        [55, 0.22, 'triangle'],
+        [73.4, 0.08, 'sine'],
+      ] as const) {
+        const o = ctx.createOscillator();
+        o.type = type;
+        o.frequency.value = f;
+        const g = ctx.createGain();
+        g.gain.value = level;
+        o.connect(g).connect(filter);
+        o.start();
+        nodes.push(o);
+      }
+      const breath = ctx.createBufferSource();
+      breath.buffer = this.noiseBuffer;
+      breath.loop = true;
+      breath.playbackRate.value = 0.5;
+      const bg = ctx.createGain();
+      bg.gain.value = 0.25;
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 0.045;
+      const lg = ctx.createGain();
+      lg.gain.value = 0.2;
+      lfo.connect(lg).connect(bg.gain);
+      breath.connect(bg).connect(filter);
+      breath.start();
+      lfo.start();
+      nodes.push(breath, lfo);
+      // «As in nature»: a high, glassy shimmer over the drone (the blazing side of the disk),
+      // two close tones beating and a band of hiss, faded in by gargantuaLook().
+      const bright = ctx.createGain();
+      bright.gain.value = this.gargBright ? 0.1 : 0;
+      bright.connect(gain);
+      for (const f of [220, 221.6, 330.4]) {
+        const o = ctx.createOscillator();
+        o.type = 'sine';
+        o.frequency.value = f;
+        const g = ctx.createGain();
+        g.gain.value = f > 300 ? 0.25 : 0.5;
+        o.connect(g).connect(bright);
+        o.start();
+        nodes.push(o);
+      }
+      const hiss = ctx.createBufferSource();
+      hiss.buffer = this.noiseBuffer;
+      hiss.loop = true;
+      const band = ctx.createBiquadFilter();
+      band.type = 'bandpass';
+      band.frequency.value = 1400;
+      band.Q.value = 3;
+      const hg = ctx.createGain();
+      hg.gain.value = 0.35;
+      hiss.connect(band).connect(hg).connect(bright);
+      hiss.start();
+      nodes.push(hiss);
+      // The bright voice bypasses the drone's low-pass (it would cut it away).
+      bright.disconnect();
+      bright.connect(this.master);
+      bright.connect(this.reverbSend);
+      this.garg = { gain, filter, bright, nodes };
+      window.clearInterval(this.sparkleTimer);
+      this.ramp(this.padGain.gain, 0, 2);
+      this.ramp(this.droneGain.gain, 0, 2);
+      this.ramp(gain.gain, 0.5, 4);
+    } else if (!on && this.garg) {
+      const { gain, bright, nodes } = this.garg;
+      this.garg = null;
+      this.ramp(gain.gain, 0, 1.5);
+      this.ramp(bright.gain, 0, 1.5);
+      window.setTimeout(() => {
+        nodes.forEach((n) => n.stop());
+        gain.disconnect();
+        bright.disconnect();
+      }, 1700);
+    }
+  }
+
+  /**
+   * Gargantua's look changing: «as in nature» brings in the bright voice, and either way a
+   * short sweep of air marks the change (up into nature, down into the film).
+   */
+  gargantuaLook(physics: boolean, sweep = true): void {
+    this.gargBright = physics;
+    if (!this.ctx || !this.garg) return;
+    const ctx = this.ctx;
+    this.ramp(this.garg.bright.gain, physics ? 0.1 : 0, 1.6);
+    if (!sweep || !this.cuesEnabled) return;
+    const t = this.now();
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const f = ctx.createBiquadFilter();
+    f.type = 'bandpass';
+    f.Q.value = 4;
+    f.frequency.setValueAtTime(physics ? 300 : 2400, t);
+    f.frequency.exponentialRampToValueAtTime(physics ? 2400 : 300, t + 1.4);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.18, t + 0.5);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 1.6);
+    src.connect(f).connect(g).connect(this.master);
+    g.connect(this.reverbSend);
+    src.start(t);
+    src.stop(t + 1.7);
+  }
+
+  private throat: { gain: GainNode; nodes: AudioScheduledSourceNode[] } | null = null;
+
+  /**
+   * A wormhole's mouth close by, 0..1: a low hum with a slow wobble and a breath of air
+   * through it, growing as we near the throat.
+   */
+  throatHum(k: number): void {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    if (!this.throat) {
+      if (k < 0.01) return;
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      gain.connect(this.master);
+      gain.connect(this.reverbSend);
+      const nodes: AudioScheduledSourceNode[] = [];
+      const wob = ctx.createGain();
+      wob.gain.value = 0.7;
+      wob.connect(gain);
+      for (const [fr, level] of [
+        [46, 0.5],
+        [69.3, 0.3],
+        [92.6, 0.12],
+      ] as const) {
+        const o = ctx.createOscillator();
+        o.frequency.value = fr;
+        const g = ctx.createGain();
+        g.gain.value = level;
+        o.connect(g).connect(wob);
+        o.start();
+        nodes.push(o);
+      }
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 0.31;
+      const lg = ctx.createGain();
+      lg.gain.value = 0.3;
+      lfo.connect(lg).connect(wob.gain);
+      lfo.start();
+      const air = ctx.createBufferSource();
+      air.buffer = this.noiseBuffer;
+      air.loop = true;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 380;
+      bp.Q.value = 1.4;
+      const ag = ctx.createGain();
+      ag.gain.value = 0.2;
+      air.connect(bp).connect(ag).connect(gain);
+      air.start();
+      nodes.push(lfo, air);
+      this.throat = { gain, nodes };
+    }
+    this.throat.gain.gain.setTargetAtTime(Math.min(1, Math.max(0, k)) * 0.35, this.now(), 0.4);
+  }
+
+  /** How close we are to the hole, 0..1: the drone opens up and grows. */
+  gargantuaNear(k: number): void {
+    if (!this.ctx || !this.garg) return;
+    const t = this.now();
+    this.garg.filter.frequency.setTargetAtTime(220 + 900 * k, t, 0.6);
+    this.garg.gain.gain.setTargetAtTime(0.4 + 0.45 * k, t, 0.6);
+  }
+
   /** Steady soundscape for a stage after jumping along the timeline. */
   settle(stage: 'intro' | 'bang' | 'plasma' | 'cosmos' | 'approach' | 'solar'): void {
     if (!this.ctx) return;

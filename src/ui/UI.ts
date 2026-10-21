@@ -1,7 +1,8 @@
 import { gsap } from 'gsap';
 import type { Planet } from '../data/planets';
 import type { ZoomHud } from '../scenes/CosmicZoom';
-import { CURIOUS, type CuriousName } from '../scenes/curious';
+import { CURIOUS, type CardInfo, type CuriousName } from '../scenes/curious';
+import { decimal, grouped, lang, setLang, tr } from '../i18n';
 
 export interface UIHandlers {
   onSound(): void;
@@ -28,6 +29,8 @@ export interface UIHandlers {
   onCuriousScene(name: CuriousName): void;
   /** Toggle «Політ крізь Галактику». */
   onDrift(): void;
+  /** Gargantua: show the hole as in the film or as in nature. */
+  onHoleLook(look: 'film' | 'physics'): void;
 }
 
 export interface Tick {
@@ -55,35 +58,47 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, ht
 
 export class UI {
   readonly hud = el('div', 'hud');
-  private brand = el('div', 'brand', 'Народження Всесвіту');
-  private prompt = el('div', 'prompt', 'Натисніть, щоб почати');
-  private warning = el('div', 'warning', 'Увага: містить яскраві спалахи світла');
+  private brand = el('div', 'brand', tr('Народження Всесвіту'));
+  private prompt = el('div', 'prompt', tr('Натисніть, щоб почати'));
+  private warning = el('div', 'warning', tr('Увага: містить яскраві спалахи світла'));
+  /** Credit for the textures (CC BY 4.0 asks that everyone who sees them can see it). */
+  private credits = el(
+    'div',
+    'credits',
+    `${tr('Текстури планет і неба')}: © <a href="https://www.solarsystemscope.com/textures/" target="_blank" rel="noopener">Solar System Scope</a>, ` +
+      `<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> · ` +
+      `${tr('Земля')}: NASA Blue Marble`,
+  );
   private caption = el('div', 'caption');
   private soundBtn = el('button', 'btn');
-  private skipBtn = el('button', 'btn', `${ICON_SKIP}<span>Пропустити до Сонячної системи</span><kbd>S</kbd>`);
-  private restartBtn = el('button', 'btn', `${ICON_RESTART}<span>Почати спочатку</span><kbd>R</kbd>`);
-  private rewindBtn = el('button', 'btn is-hidden', `${ICON_REWIND}<span>Назад у часі</span><kbd>B</kbd>`);
+  /** УК / EN: the page reloads in the other language. */
+  private langBtn = el('button', 'btn btn--lang', lang === 'uk' ? '<span>EN</span>' : '<span>УК</span>');
+  private skipBtn = el('button', 'btn', `${ICON_SKIP}<span>${tr('Пропустити до Сонячної системи')}</span><kbd>S</kbd>`);
+  private restartBtn = el('button', 'btn', `${ICON_RESTART}<span>${tr('Почати спочатку')}</span><kbd>R</kbd>`);
+  private rewindBtn = el('button', 'btn is-hidden', `${ICON_REWIND}<span>${tr('Назад у часі')}</span><kbd>B</kbd>`);
   /** One element per timeline caption, so each can animate letter by letter. */
   private captionEls: HTMLElement[] = [];
   private zoomNav = el('nav', 'zoom-nav');
   private zoomItems: HTMLButtonElement[] = [];
   private zoomMarker = el('i', 'zoom-nav__marker');
-  private homeBtn = el('button', 'btn zoom-home', `${ICON_HOME}<span>Додому</span><kbd>H</kbd>`);
-  private tourBtn = el('button', 'btn is-hidden', `${ICON_TOUR}<span>Екскурсія</span><kbd>T</kbd>`);
-  private compareBtn = el('button', 'btn is-hidden', `${ICON_SIZES}<span>Розміри</span><kbd>V</kbd>`);
-  private driftBtn = el('button', 'btn is-hidden', `${ICON_DRIFT}<span>Політ</span><kbd>G</kbd>`);
+  private homeBtn = el('button', 'btn zoom-home', `${ICON_HOME}<span>${tr('Додому')}</span><kbd>H</kbd>`);
+  private tourBtn = el('button', 'btn is-hidden', `${ICON_TOUR}<span>${tr('Екскурсія')}</span><kbd>T</kbd>`);
+  private compareBtn = el('button', 'btn is-hidden', `${ICON_SIZES}<span>${tr('Розміри')}</span><kbd>V</kbd>`);
+  private driftBtn = el('button', 'btn is-hidden', `${ICON_DRIFT}<span>${tr('Політ')}</span><kbd>G</kbd>`);
   private compareLayer = el('div', 'zoom-labels compare-labels');
-  private curiousBtn = el('button', 'btn is-hidden', `${ICON_CURIOUS}<span>Для допитливих</span><kbd>N</kbd>`);
+  private curiousBtn = el('button', 'btn is-hidden', `${ICON_CURIOUS}<span>${tr('Для допитливих')}</span><kbd>N</kbd>`);
   private curiousMenu = el('div', 'curious-menu');
   private comparePool: HTMLElement[] = [];
-  private photoHint = el('div', 'photo-hint', 'Фото-режим · <kbd>P</kbd> повернути інтерфейс · <kbd>C</kbd> зберегти кадр');
+  private skyLayer = el('div', 'zoom-labels sky-labels');
+  private skyPool: HTMLElement[] = [];
+  private photoHint = el('div', 'photo-hint', `${tr('Фото-режим')} · <kbd>P</kbd> ${tr('повернути інтерфейс')} · <kbd>C</kbd> ${tr('зберегти кадр')}`);
   private history = el('div', 'history');
   private photo = false;
   private historyTl: gsap.core.Timeline | null = null;
   private scaleBar = el('div', 'scale-bar', '<span class="scale-bar__label"></span><i class="scale-bar__line"></i>');
   private zoomLayer = el('div', 'zoom-labels');
   private zoomLabelPool: HTMLElement[] = [];
-  private here = el('div', 'here', '<i class="here__ring"></i><i class="here__line"></i><span class="here__label">Ви тут</span>');
+  private here = el('div', 'here', `<i class="here__ring"></i><i class="here__line"></i><span class="here__label">${tr('Ви тут')}</span>`);
   private reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   private timeline = el('div', 'timeline');
   private counter = el('div', 'timeline__counter');
@@ -93,13 +108,17 @@ export class UI {
   private hoverTip = el('div', 'timeline__hover');
   private hoverMark = el('div', 'timeline__ghost');
   private tickLabels: { node: HTMLElement; at: number }[] = [];
-  private paused = el('div', 'paused', 'Пауза');
-  private finalHint = el('div', 'final-hint', 'Наведіть на планету · клік — подробиці · коліщатко — віддалитися · P — фото');
+  private paused = el('div', 'paused', tr('Пауза'));
+  private finalHint = el('div', 'final-hint', tr('Наведіть на планету · клік — подробиці · E — затемнення · J — комета · K — сузір’я · P — фото'));
   private speed = el('label', 'speed');
   private speedInput = document.createElement('input');
   private speedOut = document.createElement('output');
   private label = el('div', 'planet-label');
+  /** «Інтерстелар»: time near Miller's planet against time on Earth. */
+  private clock = el('div', 'time-clock', '<div class="time-clock__row"><span></span><b></b></div><div class="time-clock__row"><span></span><b></b></div>');
   private card = el('aside', 'card');
+  /** Gargantua: as in the film or as in nature. */
+  private lookSwitch = el('div', 'look-switch');
   private barTop = el('div', 'letterbox letterbox--top');
   private barBottom = el('div', 'letterbox letterbox--bottom');
   readonly flashEl = el('div', 'flash');
@@ -107,35 +126,35 @@ export class UI {
   private narrow = el(
     'div',
     'narrow',
-    `<div class="narrow__text"><div class="narrow__title">Розширте вікно браузера</div><div class="narrow__sub">Всесвіт не вміщується у вікно, вужче за 1024 пікселі</div></div>`,
+    `<div class="narrow__text"><div class="narrow__title">${tr('Розширте вікно браузера')}</div><div class="narrow__sub">${tr('Всесвіт не вміщується у вікно, вужче за 1024 пікселі')}</div></div>`,
   );
   private promptTween?: gsap.core.Tween;
 
   constructor(parent: HTMLElement, private handlers: UIHandlers) {
     const controls = el('div', 'controls');
     this.soundBtn.type = this.skipBtn.type = this.restartBtn.type = this.rewindBtn.type = this.tourBtn.type = this.homeBtn.type = 'button';
-    this.tourBtn.title = 'Екскурсія планетами (T)';
+    this.tourBtn.title = tr('Екскурсія планетами (T)');
     this.compareBtn.type = 'button';
-    this.compareBtn.title = 'Справжні розміри Сонця і планет (V)';
+    this.compareBtn.title = tr('Справжні розміри Сонця і планет (V)');
     this.compareBtn.addEventListener('click', () => handlers.onCompare());
     this.driftBtn.type = 'button';
-    this.driftBtn.title = 'Політ крізь Галактику: як рухаються Сонце і планети насправді (G)';
+    this.driftBtn.title = tr('Політ крізь Галактику: як рухаються Сонце і планети насправді (G)');
     this.driftBtn.addEventListener('click', () => handlers.onDrift());
     this.tourBtn.addEventListener('click', () => handlers.onTour());
-    this.homeBtn.title = 'Повернутися до Сонячної системи (H)';
+    this.homeBtn.title = tr('Повернутися до Сонячної системи (H)');
     this.homeBtn.addEventListener('click', () => handlers.onZoomHome());
-    this.rewindBtn.title = 'Назад у часі: до Великого вибуху (B)';
-    this.soundBtn.title = 'Звук (M)';
-    this.skipBtn.title = 'Пропустити до Сонячної системи (S)';
-    this.restartBtn.title = 'Почати спочатку (R)';
+    this.rewindBtn.title = tr('Назад у часі: до Великого вибуху (B)');
+    this.soundBtn.title = tr('Звук (M)');
+    this.skipBtn.title = tr('Пропустити до Сонячної системи (S)');
+    this.restartBtn.title = tr('Почати спочатку (R)');
     this.curiousBtn.type = 'button';
-    this.curiousBtn.title = 'Для допитливих: короткі наукові сцени (N)';
+    this.curiousBtn.title = tr('Для допитливих: короткі наукові сцени (N)');
     this.curiousBtn.setAttribute('aria-haspopup', 'true');
     this.curiousBtn.setAttribute('aria-expanded', 'false');
     this.curiousBtn.addEventListener('click', () => handlers.onCurious());
-    this.curiousMenu.innerHTML = `<div class="curious-menu__title">Для допитливих</div>`;
+    this.curiousMenu.innerHTML = `<div class="curious-menu__title">${tr('Для допитливих')}</div>`;
     CURIOUS.forEach((c, i) => {
-      const b = el('button', 'curious-menu__item', `<span><b>${c.title}</b><small>${c.sub}</small></span><kbd>${i + 1}</kbd>`);
+      const b = el('button', 'curious-menu__item', `<span><b>${tr(c.title)}</b><small>${tr(c.sub)}</small></span><kbd>${i + 1}</kbd>`);
       b.type = 'button';
       b.addEventListener('click', () => handlers.onCuriousScene(c.name));
       this.curiousMenu.append(b);
@@ -145,7 +164,11 @@ export class UI {
       const t = e.target as Node;
       if (this.curiousMenuOpen && !this.curiousMenu.contains(t) && !this.curiousBtn.contains(t)) this.setCuriousMenu(false);
     });
-    controls.append(this.soundBtn, this.skipBtn, this.driftBtn, this.compareBtn, this.tourBtn, this.curiousBtn, this.rewindBtn, this.restartBtn);
+    this.langBtn.type = 'button';
+    this.langBtn.title = lang === 'uk' ? 'English' : 'Українська';
+    this.langBtn.setAttribute('lang', lang === 'uk' ? 'en' : 'uk');
+    this.langBtn.addEventListener('click', () => setLang(lang === 'uk' ? 'en' : 'uk'));
+    controls.append(this.soundBtn, this.skipBtn, this.driftBtn, this.compareBtn, this.tourBtn, this.curiousBtn, this.rewindBtn, this.langBtn, this.restartBtn);
     this.rewindBtn.addEventListener('click', () => handlers.onRewind());
     this.soundBtn.addEventListener('click', () => handlers.onSound());
     this.skipBtn.addEventListener('click', () => handlers.onSkip());
@@ -176,26 +199,44 @@ export class UI {
     this.speedInput.max = '4';
     this.speedInput.step = '0.1';
     this.speedInput.value = '1';
-    this.speedInput.setAttribute('aria-label', 'Швидкість обертання орбіт');
-    this.speedOut.textContent = '1,0×';
-    this.speed.append(document.createTextNode('Швидкість орбіт'), this.speedInput, this.speedOut);
+    this.speedInput.setAttribute('aria-label', tr('Швидкість обертання орбіт'));
+    this.speedOut.textContent = `${decimal(1, 1)}×`;
+    this.speed.append(document.createTextNode(tr('Швидкість орбіт')), this.speedInput, this.speedOut);
     this.speedInput.addEventListener('input', () => {
       const v = Number(this.speedInput.value);
-      this.speedOut.textContent = `${v.toFixed(1).replace('.', ',')}×`;
+      this.speedOut.textContent = `${decimal(v, 1)}×`;
       handlers.onSpeed(v);
     });
     this.speedInput.addEventListener('keydown', (e) => e.stopPropagation());
 
     this.card.setAttribute('aria-live', 'polite');
     ['Сонячна система', 'Сусідні зорі', 'Чумацький Шлях', 'Місцева група', 'Космічна павутина', 'Спостережуваний Всесвіт'].forEach((name, i) => {
-      const b = el('button', 'zoom-nav__item', `<span>${name}</span><i></i>`);
+      const b = el('button', 'zoom-nav__item', `<span>${tr(name)}</span><i></i>`);
       b.type = 'button';
       b.addEventListener('click', () => handlers.onZoomLevel(i));
       this.zoomItems.push(b);
       this.zoomNav.append(b);
     });
     this.zoomNav.prepend(this.zoomMarker);
-    this.zoomNav.setAttribute('aria-label', 'Масштаб Всесвіту');
+    this.zoomNav.setAttribute('aria-label', tr('Масштаб Всесвіту'));
+
+    this.lookSwitch.setAttribute('role', 'group');
+    this.lookSwitch.setAttribute('aria-label', tr('Вигляд чорної діри'));
+    this.lookSwitch.innerHTML = `<span class="look-switch__title">${tr('Вигляд діри')} <kbd>F</kbd></span>`;
+    (
+      [
+        ['film', 'Як у кіно', 'Як у «Інтерстеларі»: кругла тінь, рівне золоте світло'],
+        ['physics', 'Як насправді', 'Як у природі: швидке обертання, ефект Доплера, гарячіші кольори'],
+      ] as const
+    ).forEach(([look, text, title]) => {
+      const b = el('button', 'look-switch__item', tr(text));
+      b.type = 'button';
+      b.dataset.look = look;
+      b.title = tr(title);
+      b.addEventListener('click', () => handlers.onHoleLook(look));
+      b.addEventListener('keydown', (e) => e.key === ' ' && e.preventDefault());
+      this.lookSwitch.append(b);
+    });
 
     this.hud.append(
       this.brand,
@@ -208,6 +249,7 @@ export class UI {
       this.speed,
       this.zoomLayer,
       this.compareLayer,
+      this.skyLayer,
       this.zoomNav,
       this.homeBtn,
       this.scaleBar,
@@ -215,9 +257,11 @@ export class UI {
       this.history,
       controls,
       this.curiousMenu,
+      this.lookSwitch,
+      this.credits,
     );
     // The flash sits under the HUD so captions stay readable through the brightest moments.
-    parent.append(this.barTop, this.barBottom, this.flashEl, this.hud, this.here, this.label, this.photoHint, this.veilEl, this.narrow);
+    parent.append(this.barTop, this.barBottom, this.flashEl, this.hud, this.here, this.label, this.clock, this.photoHint, this.veilEl, this.narrow);
   }
 
   // ---------------------------------------------------------------- start screen
@@ -239,7 +283,7 @@ export class UI {
   }
 
   setSound(muted: boolean): void {
-    this.soundBtn.innerHTML = `${muted ? ICON_SOUND_OFF : ICON_SOUND_ON}<span>${muted ? 'Звук вимк.' : 'Звук увімк.'}</span><kbd>M</kbd>`;
+    this.soundBtn.innerHTML = `${muted ? ICON_SOUND_OFF : ICON_SOUND_ON}<span>${tr(muted ? 'Звук вимк.' : 'Звук увімк.')}</span><kbd>M</kbd>`;
     this.soundBtn.setAttribute('aria-pressed', String(!muted));
   }
 
@@ -256,7 +300,7 @@ export class UI {
   /** Adds a one-line caption to the master timeline so it pauses with everything else. */
   private makeCaption(text: string): { node: HTMLElement; chars: HTMLElement[] } {
     const node = el('div', 'caption caption--letters');
-    const chars = [...text].map((c) => {
+    const chars = [...tr(text)].map((c) => {
       const span = el('span', 'ch');
       span.textContent = c === ' ' ? '\u00a0' : c;
       // Hidden until its own turn in the stagger comes.
@@ -306,8 +350,8 @@ export class UI {
     const node = el('div', 'title-card');
     const big = el('div', 'title-card__big');
     const small = el('div', 'title-card__small');
-    const a = this.spans('13,8 мільярда років');
-    const b = this.spans('Одна мить — і ми тут');
+    const a = this.spans(tr('13,8 мільярда років'));
+    const b = this.spans(tr('Одна мить — і ми тут'));
     big.append(...a);
     small.append(...b);
     node.append(big, small);
@@ -364,23 +408,26 @@ export class UI {
       n.style.transform = `translate(${l.x.toFixed(1)}px, ${l.y.toFixed(1)}px)`;
       const b = n.querySelector('b')!;
       const sm = n.querySelector('small')!;
-      if (b.textContent !== l.text) b.textContent = l.text;
-      if (sm.textContent !== (l.sub ?? '')) sm.textContent = l.sub ?? '';
+      const text = tr(l.text);
+      const sub = tr(l.sub ?? '');
+      if (b.textContent !== text) b.textContent = text;
+      if (sm.textContent !== sub) sm.textContent = sub;
     });
     // Scale bar: pick a round length that fits ~120 px.
     const target = h.auPerPx * 120;
     const ly = 63241;
-    let unit = 'а. о.';
+    const en = lang === 'en';
+    let unit = en ? 'AU' : 'а. о.';
     let value = target;
-    if (target >= ly * 1e9) { unit = 'млрд св. р.'; value = target / (ly * 1e9); }
-    else if (target >= ly * 1e6) { unit = 'млн св. р.'; value = target / (ly * 1e6); }
-    else if (target >= ly * 1e3) { unit = 'тис. св. р.'; value = target / (ly * 1e3); }
-    else if (target >= ly * 0.5) { unit = 'св. р.'; value = target / ly; }
+    if (target >= ly * 1e9) { unit = en ? 'billion ly' : 'млрд св. р.'; value = target / (ly * 1e9); }
+    else if (target >= ly * 1e6) { unit = en ? 'million ly' : 'млн св. р.'; value = target / (ly * 1e6); }
+    else if (target >= ly * 1e3) { unit = en ? 'thousand ly' : 'тис. св. р.'; value = target / (ly * 1e3); }
+    else if (target >= ly * 0.5) { unit = en ? 'ly' : 'св. р.'; value = target / ly; }
     const pow = Math.pow(10, Math.floor(Math.log10(value)));
     const nice = [1, 2, 5, 10].map((m) => m * pow).filter((m) => m <= value).pop() ?? pow;
     const px = (nice / value) * 120;
     (this.scaleBar.querySelector('.scale-bar__line') as HTMLElement).style.width = `${px.toFixed(1)}px`;
-    const label = `${nice >= 1 ? nice.toLocaleString('uk-UA') : nice.toFixed(1)} ${unit}`;
+    const label = `${nice >= 1 ? grouped(nice) : decimal(nice, 1)} ${unit}`;
     const lab = this.scaleBar.querySelector('.scale-bar__label')!;
     if (lab.textContent !== label) lab.textContent = label;
   }
@@ -396,7 +443,7 @@ export class UI {
 
   showCaption(text: string, hold = 4): void {
     gsap.killTweensOf(this.caption);
-    this.caption.textContent = text;
+    this.caption.textContent = tr(text);
     gsap.fromTo(this.caption, { opacity: 0, y: 6 }, { opacity: 1, y: 0, duration: 1, ease: 'sine.out' });
     gsap.to(this.caption, { opacity: 0, duration: 1.2, delay: hold, ease: 'sine.in' });
   }
@@ -502,36 +549,66 @@ export class UI {
     if (!active) this.setZoomHud({ z: 0, labels: [], auPerPx: 1 });
     if (!active) {
       this.speedInput.value = '1';
-      this.speedOut.textContent = '1,0×';
+      this.speedOut.textContent = `${decimal(1, 1)}×`;
       this.hideCard();
       this.showLabel(null);
     }
   }
 
   showLabel(name: string | null): void {
-    if (name) this.label.textContent = name;
+    if (name) this.label.textContent = tr(name);
     this.label.classList.toggle('is-visible', !!name);
+  }
+
+  /** Gargantua's look switch: which look is on, or null to hide it. */
+  setHoleLook(look: 'film' | 'physics' | null): void {
+    this.lookSwitch.classList.toggle('is-visible', !!look);
+    this.lookSwitch.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
+      const on = b.dataset.look === look;
+      b.classList.toggle('is-on', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+  }
+
+  /** Two rows of label and value, or null to hide. */
+  setClock(rows: [string, string][] | null): void {
+    this.clock.classList.toggle('is-visible', !!rows);
+    if (!rows) return;
+    this.clock.querySelectorAll('.time-clock__row').forEach((row, i) => {
+      const [k, v] = rows[i] ?? ['', ''];
+      const span = row.querySelector('span')!;
+      const b = row.querySelector('b')!;
+      const key = tr(k);
+      if (span.textContent !== key) span.textContent = key;
+      if (b.textContent !== v) b.textContent = v;
+    });
   }
 
   moveLabel(x: number, y: number): void {
     this.label.style.transform = `translate(${x + 18}px, ${y - 12}px)`;
   }
 
-  showCard(p: Planet): void {
+  showCard(p: Planet | CardInfo): void {
     this.hideHistory();
+    const rows: [string, string][] =
+      'rows' in p
+        ? p.rows
+        : [
+            ['Діаметр', p.diameter],
+            ['Відстань від Сонця', p.distance],
+            ['Тривалість доби', p.day],
+            ['Тривалість року', p.year],
+            ['Супутники', p.moons],
+          ];
     this.card.innerHTML = `
-      <button class="card__close" type="button" aria-label="Закрити">×</button>
-      <div class="card__kicker">${p.kicker}</div>
-      <h2 class="card__name">${p.name}</h2>
+      <button class="card__close" type="button" aria-label="${tr('Закрити')}">×</button>
+      <div class="card__kicker">${tr(p.kicker)}</div>
+      <h2 class="card__name">${tr(p.name)}</h2>
       <dl class="card__rows">
-        <dt>Діаметр</dt><dd>${p.diameter}</dd>
-        <dt>Відстань від Сонця</dt><dd>${p.distance}</dd>
-        <dt>Тривалість доби</dt><dd>${p.day}</dd>
-        <dt>Тривалість року</dt><dd>${p.year}</dd>
-        <dt>Супутники</dt><dd>${p.moons}</dd>
+        ${rows.map(([k, v]) => `<dt>${tr(k)}</dt><dd>${tr(v)}</dd>`).join('')}
       </dl>
-      <p class="card__fact">${p.fact}</p>
-      <div class="card__hint">Esc або клік поза карткою — назад</div>`;
+      <p class="card__fact" data-label="${tr('Цікаво')}">${tr(p.fact)}</p>
+      <div class="card__hint">${tr('Esc або клік поза карткою — назад')}</div>`;
     this.card.querySelector('.card__close')!.addEventListener('click', () => this.handlers.onCloseCard());
     this.card.classList.add('is-visible');
     this.finalHint.classList.remove('is-visible');
@@ -549,7 +626,7 @@ export class UI {
   setCompare(on: boolean): void {
     document.body.classList.toggle('is-comparing', on);
     this.compareBtn.classList.toggle('is-on', on);
-    (this.compareBtn.querySelector('span') as HTMLElement).textContent = on ? 'Назад' : 'Розміри';
+    (this.compareBtn.querySelector('span') as HTMLElement).textContent = tr(on ? 'Назад' : 'Розміри');
     if (!on) this.setCompareLabels([]);
   }
 
@@ -569,19 +646,42 @@ export class UI {
       n.style.transform = `translate(${l.x.toFixed(1)}px, ${l.y.toFixed(1)}px)`;
       const b = n.querySelector('b')!;
       const sm = n.querySelector('small')!;
-      if (b.textContent !== l.text) b.textContent = l.text;
-      if (sm.textContent !== l.sub) sm.textContent = l.sub;
+      const text = tr(l.text);
+      const sub = tr(l.sub);
+      if (b.textContent !== text) b.textContent = text;
+      if (sm.textContent !== sub) sm.textContent = sub;
     });
   }
 
   setDrift(on: boolean): void {
     this.driftBtn.classList.toggle('is-on', on);
-    (this.driftBtn.querySelector('span') as HTMLElement).textContent = on ? 'Зупинити' : 'Політ';
+    (this.driftBtn.querySelector('span') as HTMLElement).textContent = tr(on ? 'Зупинити' : 'Політ');
+  }
+
+  /** Names of bright stars and constellations (K). */
+  setSkyLabels(labels: { x: number; y: number; text: string; kind: 'star' | 'constellation'; opacity: number }[]): void {
+    while (this.skyPool.length < labels.length) {
+      const n = el('div', 'sky-label');
+      this.skyLayer.append(n);
+      this.skyPool.push(n);
+    }
+    this.skyPool.forEach((n, i) => {
+      const l = labels[i];
+      if (!l) {
+        n.style.opacity = '0';
+        return;
+      }
+      n.className = `sky-label sky-label--${l.kind}`;
+      n.style.opacity = l.opacity.toFixed(3);
+      n.style.transform = `translate(${l.x.toFixed(1)}px, ${l.y.toFixed(1)}px)`;
+      const text = tr(l.text);
+      if (n.textContent !== text) n.textContent = text;
+    });
   }
 
   setTour(on: boolean): void {
     this.tourBtn.classList.toggle('is-on', on);
-    (this.tourBtn.querySelector('span') as HTMLElement).textContent = on ? 'Зупинити' : 'Екскурсія';
+    (this.tourBtn.querySelector('span') as HTMLElement).textContent = tr(on ? 'Зупинити' : 'Екскурсія');
   }
 
   // ---------------------------------------------------------------- for the curious
@@ -597,12 +697,14 @@ export class UI {
   }
 
   /** While an optional scene plays: the Solar System controls step aside, the button reads «Назад». */
-  setCurious(on: boolean): void {
+  setCurious(on: boolean, explorable = false): void {
     this.setCuriousMenu(false);
     document.body.classList.toggle('is-curious', on);
+    // A scene you can fly around keeps the name label and the info card.
+    document.body.classList.toggle('is-explorable', on && explorable);
     this.curiousBtn.classList.toggle('is-on', on);
-    (this.curiousBtn.querySelector('span') as HTMLElement).textContent = on ? 'Назад' : 'Для допитливих';
-    this.curiousBtn.title = on ? 'Повернутися до Сонячної системи (Esc)' : 'Для допитливих: короткі наукові сцени (N)';
+    (this.curiousBtn.querySelector('span') as HTMLElement).textContent = tr(on ? 'Назад' : 'Для допитливих');
+    this.curiousBtn.title = on ? tr('Повернутися до Сонячної системи (Esc)') : tr('Для допитливих: короткі наукові сцени (N)');
   }
 
   // ---------------------------------------------------------------- photo mode
@@ -633,19 +735,19 @@ export class UI {
   showHistory(): void {
     const AGE = 13.8;
     const marks = [
-      { at: 0, text: 'Великий вибух', cls: 'history__mark--start' },
-      { at: 0.2, text: 'Перші зорі', cls: 'history__mark--low history__mark--start' },
-      { at: 9.2, text: 'Сонце і Земля', cls: '' },
-      { at: 10.0, text: 'Перше життя', cls: 'history__mark--low' },
-      { at: 13.57, text: 'Динозаври', cls: 'history__mark--low' },
+      { at: 0, text: tr('Великий вибух'), cls: 'history__mark--start' },
+      { at: 0.2, text: tr('Перші зорі'), cls: 'history__mark--low history__mark--start' },
+      { at: 9.2, text: tr('Сонце і Земля'), cls: '' },
+      { at: 10.0, text: tr('Перше життя'), cls: 'history__mark--low' },
+      { at: 13.57, text: tr('Динозаври'), cls: 'history__mark--low' },
     ];
     this.history.innerHTML = `
-      <div class="history__title">13,8 мільярда років в одній лінії</div>
+      <div class="history__title">${tr('13,8 мільярда років в одній лінії')}</div>
       <div class="history__bar"><i class="history__fill"></i>
         ${marks.map((m) => `<span class="history__mark ${m.cls}" style="left:${((m.at / AGE) * 100).toFixed(2)}%"><b>${m.text}</b></span>`).join('')}
-        <span class="history__mark history__mark--us history__mark--end" style="left:100%"><b>Ми</b></span>
+        <span class="history__mark history__mark--us history__mark--end" style="left:100%"><b>${tr('Ми')}</b></span>
       </div>
-      <div class="history__note">Якби історія Всесвіту тривала один рік, люди з'явилися б 31 грудня — за 11 хвилин до опівночі</div>`;
+      <div class="history__note">${tr("Якби історія Всесвіту тривала один рік, люди з'явилися б 31 грудня — за 11 хвилин до опівночі")}</div>`;
     const fill = this.history.querySelector('.history__fill') as HTMLElement;
     const items = this.history.querySelectorAll('.history__mark');
     const note = this.history.querySelector('.history__note') as HTMLElement;
@@ -687,9 +789,10 @@ function plural(n: number, one: string, few: string, many: string): string {
 
 const group = (n: number) => Math.floor(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 
-/** Formats cosmic age in Ukrainian: «0 секунд», «3 хвилини», «380 000 років», «13,8 млрд років». */
+/** Formats cosmic age: «0 секунд», «3 хвилини», «380 000 років», «13,8 млрд років» (or in English). */
 export function formatCosmicTime(seconds: number): string {
   const s = Math.max(0, seconds);
+  if (lang === 'en') return formatCosmicTimeEn(s);
   if (s < 60) {
     const n = Math.floor(s);
     return `${n} ${plural(n, 'секунда', 'секунди', 'секунд')}`;
@@ -714,6 +817,22 @@ export function formatCosmicTime(seconds: number): string {
   if (years < 1e9) return `${Math.round(years / 1e6)} млн років`;
   const g = Math.round(years / 1e8) / 10;
   return `${Number.isInteger(g) ? g : g.toFixed(1).replace('.', ',')} млрд років`;
+}
+
+function formatCosmicTimeEn(s: number): string {
+  const unit = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  if (s < 60) return unit(Math.floor(s), 'second');
+  if (s < 3600) return unit(Math.floor(s / 60), 'minute');
+  if (s < 86400) return unit(Math.floor(s / 3600), 'hour');
+  const years = s / YEAR;
+  if (years < 1) return unit(Math.floor(s / 86400), 'day');
+  if (years < 1e6) {
+    const n = years < 1000 ? Math.floor(years) : Math.round(years / 1000) * 1000;
+    return `${n.toLocaleString('en-GB')} year${n === 1 ? '' : 's'}`;
+  }
+  if (years < 1e9) return `${Math.round(years / 1e6)} million years`;
+  const g = Math.round(years / 1e8) / 10;
+  return `${Number.isInteger(g) ? g : g.toFixed(1)} billion years`;
 }
 
 export const cosmicYears = (years: number) => years * YEAR;
