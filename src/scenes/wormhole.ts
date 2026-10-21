@@ -45,7 +45,7 @@ export const SKIES = /* glsl */ `
     float l = atan(dot(d, uGalY), dot(d, uGalX));
     float b = asin(clamp(dot(d, uGalN), -1.0, 1.0));
     vec3 c = textureLod(uSky, vec2(fract(0.5 - l / 6.2831853), 0.5 - b / 3.1415927), 0.0).rgb;
-    return col + max(c - 0.006, 0.0) * 2.2;
+    return col + 6.0 * pow(c, vec3(2.2)) * 0.18; // decoded as in util.ts, then 2.2/12 of its lift
   }
 
   vec3 otherSky(vec3 d, float fp) {

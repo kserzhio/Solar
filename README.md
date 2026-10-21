@@ -92,4 +92,4 @@ src/
 
 `public/textures/planets/` — карти Меркурія, Венери (хмарний шар), Марса, Юпітера, Сатурна та його кілець, Урана, Нептуна, Місяця, Церери й Еріди: © [Solar System Scope](https://www.solarsystemscope.com/textures/), ліцензія [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Карти перестиснуто: газові гіганти, Марс і Венера у WebP, кратерні тіла лишаються в JPEG (якість 0,86); Плутон і супутники Юпітера та Сатурна лишаються процедурними.
 
-`public/textures/sky/milky_way_4k.webp` — панорама неба з Чумацьким Шляхом (галактичні координати), © [Solar System Scope](https://www.solarsystemscope.com/textures/), CC BY 4.0, зменшена з 8K до 4096×2048 і перестиснута у WebP; поки її немає, смуга малюється процедурно.
+`public/textures/sky/milky_way.webp` — панорама неба з Чумацьким Шляхом (галактичні координати), © [Solar System Scope](https://www.solarsystemscope.com/textures/), CC BY 4.0, зменшена з 8K до 4096×2048 скриптом `scripts/bake_sky.py` (слабке світіння вже підсилене й згладжене, тож на небі немає плям і смуг); поки її немає, смуга малюється процедурно.

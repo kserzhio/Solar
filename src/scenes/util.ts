@@ -302,7 +302,7 @@ export function createMilkyWay(renderer: THREE.WebGLRenderer, radius = 280) {
       uOpacity: { value: 0.1 },
       uPhoto: { value: null as THREE.Texture | null },
       uPhotoOn: { value: 0 },
-      uGain: { value: 12 },
+      uGain: { value: 1 },
       uGalX: { value: galX },
       uGalY: { value: galY },
       uGalN: { value: galN },
@@ -333,10 +333,22 @@ export function createMilkyWay(renderer: THREE.WebGLRenderer, radius = 280) {
           float l = atan(dot(d, uGalY), dot(d, uGalX));
           float b = asin(clamp(dot(d, uGalN), -1.0, 1.0));
           vec2 uv = vec2(fract(0.5 - l / 6.2831853), 0.5 - b / 3.1415927);
-          vec3 sky = texture2D(uPhoto, uv).rgb;
-          // The photo is very dark: lift the faint band, but subtract the floor first so the
-          // empty sky stays black.
-          col = max(sky - 0.006, 0.0) * uGain;
+          // Where u wraps from 1 to 0 its screen derivative jumps, and the GPU would take the
+          // smallest (near-black) mip level: a thin dark line across the sky. A copy of u that
+          // wraps on the opposite side is smooth there, so take the narrower of the two.
+          float u2 = fract(uv.x + 0.5) - 0.5;
+          vec2 dx = vec2(dFdx(uv.x), dFdx(uv.y));
+          vec2 dy = vec2(dFdy(uv.x), dFdy(uv.y));
+          float dx2 = dFdx(u2);
+          float dy2 = dFdy(u2);
+          if (abs(dx2) + abs(dy2) < abs(dx.x) + abs(dy.x)) {
+            dx.x = dx2;
+            dy.x = dy2;
+          }
+          // Stored already lifted and gamma-encoded (scripts/bake_sky.py), so the faint band
+          // has plenty of levels instead of a few 8-bit steps.
+          vec3 sky = textureGrad(uPhoto, uv, dx, dy).rgb;
+          col = 6.0 * pow(sky, vec3(2.2)) * uGain;
         } else {
           vec2 uv = vec2(atan(d.z, d.x) / 6.2831853 + 0.5, asin(clamp(d.y, -1.0, 1.0)) / 3.1415927 + 0.5);
           col = texture2D(uMap, uv).rgb;
@@ -353,11 +365,11 @@ export function createMilkyWay(renderer: THREE.WebGLRenderer, radius = 280) {
   mesh.renderOrder = -6;
 
   // Swap the procedural band for the photographic panorama once it has arrived (4K WebP,
-  // made from the 8K original: plenty for a backdrop, decoded off the main thread).
+  // baked from the 8K original by scripts/bake_sky.py; decoded off the main thread).
   let photo: THREE.Texture | null = null;
   void (async () => {
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}textures/sky/milky_way_4k.webp`);
+      const res = await fetch(`${import.meta.env.BASE_URL}textures/sky/milky_way.webp`);
       if (!res.ok) return;
       const bitmap = await createImageBitmap(await res.blob(), { resizeWidth: 4096, resizeHeight: 2048, resizeQuality: 'high', imageOrientation: 'flipY' });
       photo = new THREE.Texture(bitmap as unknown as HTMLImageElement);
