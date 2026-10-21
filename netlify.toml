@@ -7,3 +7,14 @@
   from = "/en"
   to = "/en.html"
   status = 200
+
+# Each scene's page for link previews (made at build time as s/<scene>.html).
+[[redirects]]
+  from = "/s/:name"
+  to = "/s/:name.html"
+  status = 200
+
+[[redirects]]
+  from = "/en/s/:name"
+  to = "/en/s/:name.html"
+  status = 200

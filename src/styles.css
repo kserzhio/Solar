@@ -979,3 +979,21 @@ button { font: inherit; color: inherit; }
 }
 
 /* clickable zoom label (Sagittarius A*) */
+
+/* A short note (e.g. «link copied»), above the timeline. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  padding: 9px 18px;
+  border-radius: 999px;
+  background: var(--glass);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--fg);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 40;
+}

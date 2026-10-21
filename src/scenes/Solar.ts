@@ -13,8 +13,8 @@ import { createBrightStars } from './brightStars';
 import { buildCorona, buildLoops, buildSun } from './solar/sun';
 import { KIND_INDEX, type PlanetView } from './solar/common';
 import { buildPlanet } from './solar/planet';
-import { buildPlumes } from './solar/atmosphere';
-import { AsteroidRocks, buildBelt, buildKuiperBelt, buildRingChunks, buildSolarWind } from './solar/belts';
+import { buildAurora, buildPlumes } from './solar/atmosphere';
+import { AsteroidRocks, buildBelt, buildKuiperBelt, buildRingChunks, buildSolarWind, buildZodiacalLight } from './solar/belts';
 import { PASSAGE_SPEED, Wormhole } from './wormhole';
 
 const ORBIT_OPACITY = { base: 0.13, hover: 0.42, focus: 0.3 };
@@ -116,6 +116,8 @@ export class Solar implements SceneModule {
   onShow: (kind: 'solar' | 'lunar' | 'comet' | null) => void = () => {};
   private corona: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
   private milkyWay: ReturnType<typeof createMilkyWay>;
+  private zodiacal: THREE.ShaderMaterial;
+  private auroras: { planet: PlanetView; material: THREE.ShaderMaterial }[] = [];
   private comet = new Comet();
   /** Solar flare scheduler: seconds since the last flare and until the next one. */
   private flare = { age: 99, next: 5, dir: new THREE.Vector3(1, 0, 0) };
@@ -200,12 +202,25 @@ export class Solar implements SceneModule {
     const wind = buildSolarWind();
     this.wind = wind.material;
     this.group.add(wind.points);
+    const zodiacal = buildZodiacalLight();
+    this.zodiacal = zodiacal.material;
+    this.group.add(zodiacal.mesh);
     this.buildMoons();
     this.ringChunks = buildRingChunks(this.planets.find((p) => p.data.id === 'saturn')!);
     this.buildDrift();
     this.loadEarthTextures();
     this.loadPlanetTextures();
     this.buildLineup();
+    // Polar lights on Earth and Jupiter, seen when we come close.
+    for (const [id, low, high, lat] of [
+      ['earth', '#35ff8a', '#ff4f7a', 67],
+      ['jupiter', '#8f7dff', '#c79bff', 74],
+    ] as const) {
+      const p = this.planets.find((q) => q.data.id === id)!;
+      const aurora = buildAurora(p.data.size, low, high, lat);
+      p.tilt.add(aurora.group);
+      this.auroras.push({ planet: p, material: aurora.material });
+    }
     const saturn = this.planets.find((p) => p.data.id === 'saturn')!;
     this.wormhole.group.position.copy(WORMHOLE_OFFSET);
     saturn.pivot.add(this.wormhole.group);
@@ -260,6 +275,8 @@ export class Solar implements SceneModule {
   /** Io's volcanic plumes: umbrella-shaped fountains of sulphur rising and falling. */
   private occluderWorld = new THREE.Vector3();
   private bodyQuat = new THREE.Quaternion();
+  private tmpJ = new THREE.Vector3();
+  private tmpS = new THREE.Vector3();
 
   /** Feeds eclipse occluders and Jupiter's lightning to the planet shaders. */
   private updateEclipsesAndStorms(dt: number): void {
@@ -277,7 +294,33 @@ export class Solar implements SceneModule {
       set(earth.body.material, moon.mesh.getWorldPosition(this.occluderWorld), moon.mesh.geometry.parameters.radius * ws);
       if (earth.atmosphere) set(earth.atmosphere.material, this.occluderWorld, moon.mesh.geometry.parameters.radius * ws);
     }
-    if (io) set(jupiter.body.material, io.mesh.getWorldPosition(this.occluderWorld), io.mesh.geometry.parameters.radius * ws);
+    // Jupiter: whichever Galilean moon stands between it and the Sun casts its shadow.
+    const jw = jupiter.pivot.getWorldPosition(this.tmpJ);
+    const toSun = this.tmpS.copy(jw).negate().normalize();
+    let best: (typeof this.moons)[number] | null = null;
+    let bestMiss = Infinity;
+    for (const name of ['Іо', 'Європа', 'Ганімед', 'Каллісто']) {
+      const m = byName(name);
+      if (!m) continue;
+      const rel = m.mesh.getWorldPosition(this.occluderWorld).sub(jw);
+      if (rel.dot(toSun) <= 0) continue;
+      const miss = rel.addScaledVector(toSun, -rel.dot(toSun)).length() / ws - m.mesh.geometry.parameters.radius;
+      if (miss < bestMiss) {
+        bestMiss = miss;
+        best = m;
+      }
+    }
+    const caster = best ?? io;
+    if (caster) set(jupiter.body.material, caster.mesh.getWorldPosition(this.occluderWorld), caster.mesh.geometry.parameters.radius * ws);
+    // Polar lights: only near enough to see them, facing away from the Sun at night.
+    const cam = this.ctx.camera;
+    for (const a of this.auroras) {
+      const pw = a.planet.pivot.getWorldPosition(this.tmpJ);
+      const r = a.planet.data.size * ws;
+      const d = cam.position.distanceTo(pw);
+      a.material.uniforms.uFade.value = (1 - smooth(r * 7, r * 22, d)) * this.params.intro * 0.9;
+      a.material.uniforms.uSun.value.copy(pw).negate().normalize();
+    }
     // Every moon can fall into its planet's shadow.
     for (const m of this.moons) {
       const parent = this.planets[m.parent];
@@ -408,6 +451,7 @@ export class Solar implements SceneModule {
     this.kuiper.uniforms.uClock.value = clock;
     this.kuiper.uniforms.uFade.value = ease;
     this.wind.uniforms.uFade.value = ease;
+    this.zodiacal.uniforms.uFade.value = ease;
     this.rocks.update(clock, globalUniforms.uTime.value, ease);
     (this.starfield.material as THREE.ShaderMaterial).uniforms.uOpacity.value = (0.55 + 0.25 * ease) * this.skyFade;
 

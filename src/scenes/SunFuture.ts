@@ -173,6 +173,7 @@ export class SunFuture implements CuriousScene {
     this.t = 0;
     this.told = 0;
     this.planets.forEach((p) => (p.left = 1));
+    this.ctx.audio.sunFuture(DURATION);
     this.update(0);
   }
 
@@ -241,7 +242,9 @@ export class SunFuture implements CuriousScene {
     this.stars.position.copy(cam.position);
   }
 
-  exit(): void {}
+  exit(): void {
+    this.ctx.audio.sunFuture(0);
+  }
 
   dispose(): void {
     disposeObject(this.group);

@@ -216,3 +216,62 @@ export function buildPlumes(io: THREE.Mesh, radius: number): THREE.ShaderMateria
   io.add(points);
   return material;
 }
+
+/**
+ * Polar lights: rings of glowing curtains round both magnetic poles (the auroral ovals),
+ * where particles from the Sun pour down the field lines into the upper atmosphere. Earth's
+ * are green below (oxygen low down) fading to red above; Jupiter's, far bigger and steadier,
+ * glow violet-blue. Brightest on the night side, folding and rippling in time.
+ */
+export function buildAurora(radius: number, low: string, high: string, latitude: number) {
+  const lat = THREE.MathUtils.degToRad(latitude);
+  const material = new THREE.ShaderMaterial({
+    uniforms: { uTime: globalUniforms.uTime, uLow: colorUniform(low), uHigh: colorUniform(high), uFade: { value: 0 }, uSun: { value: new THREE.Vector3(1, 0, 0) } },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      varying vec3 vDir;
+      void main() {
+        vUv = uv;
+        vDir = normalize(mat3(modelMatrix) * position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      uniform vec3 uLow;
+      uniform vec3 uHigh;
+      uniform float uFade;
+      uniform vec3 uSun;
+      varying vec2 vUv;
+      varying vec3 vDir;
+      void main() {
+        float h = vUv.y;
+        float a = vUv.x * 6.2831853;
+        // Folds of the curtain, drifting and rippling.
+        float folds = 0.55 + 0.45 * sin(a * 9.0 + uTime * 0.6 + sin(a * 3.0 - uTime * 0.4) * 1.5);
+        folds *= 0.6 + 0.4 * sin(a * 23.0 - uTime * 1.3);
+        float rays = 0.7 + 0.3 * sin(a * 140.0 + uTime * 2.0);
+        float body = smoothstep(0.0, 0.08, h) * pow(1.0 - h, 1.6);
+        vec3 col = mix(uLow, uHigh, smoothstep(0.15, 0.85, h));
+        // Faint against the daylit side.
+        float night = mix(1.0, 0.3, smoothstep(-0.2, 0.5, dot(vDir, uSun)));
+        gl_FragColor = vec4(col * folds * rays * body * night * uFade, 1.0);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+  });
+  const group = new THREE.Group();
+  for (const sign of [1, -1]) {
+    // A slanting band: its foot just above the ground at the oval, its top higher and wider.
+    const bottom = radius * 1.01, top = radius * 1.2;
+    const geo = new THREE.CylinderGeometry(top * Math.cos(lat) * 1.04, bottom * Math.cos(lat), (top - bottom) * Math.sin(lat) + radius * 0.08, 128, 1, true);
+    // Cylinder uv.y runs bottom (0) to top (1); flip for the south so "top" is always up into space.
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.position.y = sign * (bottom * Math.sin(lat) + ((top - bottom) * Math.sin(lat) + radius * 0.08) / 2);
+    if (sign < 0) mesh.rotation.x = Math.PI;
+    mesh.renderOrder = 2;
+    group.add(mesh);
+  }
+  return { group, material };
+}

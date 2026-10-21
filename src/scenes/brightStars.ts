@@ -287,6 +287,66 @@ export function createBrightStars(radius = 262) {
   );
   points.frustumCulled = false;
 
+  // Diffraction spikes on the very brightest (as a telescope's mirror and struts draw them:
+  // six long spikes and two short ones across), faint, turning a little with the twinkle.
+  const spikePos: number[] = [];
+  const spikeCol: number[] = [];
+  const spikeSize: number[] = [];
+  for (const s of STARS) {
+    if (s.mag > 0.9) continue;
+    const v = equatorialToScene(s.ra, s.dec).multiplyScalar(radius);
+    spikePos.push(v.x, v.y, v.z);
+    const c = bvColor(s.bv);
+    spikeCol.push(c.r, c.g, c.b);
+    spikeSize.push(Math.min(70, 40 * Math.pow(10, -0.2 * (s.mag - 0.0))));
+  }
+  const spikeGeo = new THREE.BufferGeometry();
+  spikeGeo.setAttribute('position', new THREE.Float32BufferAttribute(spikePos, 3));
+  spikeGeo.setAttribute('aColor', new THREE.Float32BufferAttribute(spikeCol, 3));
+  spikeGeo.setAttribute('aSize', new THREE.Float32BufferAttribute(spikeSize, 1));
+  const spikes = new THREE.Points(
+    spikeGeo,
+    new THREE.ShaderMaterial({
+      uniforms: { uOpacity, uViewScale: globalUniforms.uViewScale, uTime: globalUniforms.uTime },
+      vertexShader: /* glsl */ `
+        uniform float uViewScale;
+        uniform float uTime;
+        attribute vec3 aColor;
+        attribute float aSize;
+        varying vec3 vColor;
+        varying float vTw;
+        void main() {
+          vColor = aColor;
+          vTw = 0.8 + 0.2 * sin(uTime * 1.3 + position.x * 0.37 + position.y * 0.11);
+          gl_PointSize = aSize * (uViewScale / 760.0);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: /* glsl */ `
+        uniform float uOpacity;
+        varying vec3 vColor;
+        varying float vTw;
+        float spike(vec2 c, float ang, float width) {
+          vec2 d = vec2(cos(ang), sin(ang));
+          float across = abs(c.x * d.y - c.y * d.x);
+          return exp(-across * across / (width * width));
+        }
+        void main() {
+          vec2 c = gl_PointCoord * 2.0 - 1.0;
+          float r = length(c);
+          if (r > 1.0) discard;
+          float fall = pow(1.0 - r, 2.2);
+          float s = 0.0;
+          for (int k = 0; k < 3; k++) s += spike(c, 1.5708 + float(k) * 1.0472, 0.012);
+          s += 0.45 * spike(c, 0.0, 0.008) * (1.0 - smoothstep(0.0, 0.6, r));
+          gl_FragColor = vec4(mix(vColor, vec3(1.0), 0.4) * s * fall * vTw * uOpacity * 0.55, 1.0);
+        }`,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  spikes.frustumCulled = false;
+
   const linePos: number[] = [];
   for (const c of CONSTELLATIONS) {
     const centre = new THREE.Vector3();
@@ -311,7 +371,7 @@ export function createBrightStars(radius = 262) {
 
   const galaxies = buildGalaxies(radius, uOpacity, labels);
   const group = new THREE.Group();
-  group.add(galaxies, points, lines);
+  group.add(galaxies, spikes, points, lines);
   return {
     group,
     labels,
@@ -326,6 +386,8 @@ export function createBrightStars(radius = 262) {
     },
     dispose() {
       geometry.dispose();
+      spikeGeo.dispose();
+      (spikes.material as THREE.Material).dispose();
       lineGeo.dispose();
       (points.material as THREE.Material).dispose();
       lineMat.dispose();

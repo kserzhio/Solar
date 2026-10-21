@@ -12,7 +12,7 @@ import { Cosmos } from '../scenes/Cosmos';
 import { Approach } from '../scenes/Approach';
 import { Solar } from '../scenes/Solar';
 import { CosmicZoom } from '../scenes/CosmicZoom';
-import { CURIOUS, type CuriousName, type CuriousScene } from '../scenes/curious';
+import { CURIOUS, type CardInfo, type CuriousName, type CuriousScene } from '../scenes/curious';
 import type { Gargantua } from '../scenes/Gargantua';
 import { Director } from './Director';
 import { PerfMonitor } from './PerfMonitor';
@@ -21,10 +21,17 @@ import { Quality } from './Quality';
 import { SceneManager } from './SceneManager';
 import type { Ctx } from './types';
 import { hideBoot, setBoot } from '../boot';
+import { lang, tr } from '../i18n';
 
 type Phase = 'intro' | 'cinematic' | 'final';
 
 /** Quality steps used by the FPS watchdog: particle share, bloom mip levels, max pixel ratio. */
+/** An optional scene with things to point at and click (names and info cards). */
+interface Explorable {
+  onHover: (name: string | null) => void;
+  onFocus: (info: CardInfo | null) => void;
+}
+
 /** Scenes compiled before the start screen, and those compiled in the background after. */
 const FIRST_SCENES = ['bang', 'plasma', 'cosmos'] as const;
 const LATER_SCENES = ['approach', 'solar', 'zoom', 'nucleo', 'supernova', 'moon', 'pulsar', 'merger', 'sunfuture', 'trappist', 'gargantua'] as const;
@@ -147,6 +154,7 @@ export class App {
         if (this.phase !== 'intro') this.ui.setPhotoMode(!this.ui.photoMode);
       },
       onSaveFrame: () => this.saveFrame(),
+      onShare: () => void this.share(),
       seekLabel: (f) => formatCosmicTime(this.director.cosmicSeconds(f * this.director.endTime)),
     });
 
@@ -219,6 +227,23 @@ export class App {
         s.onFlash = () => this.ui.flash(this.ctx.reducedMotion);
         this.scenes.add(s);
       }
+      // Scenes you can explore: a name on hover, a card on a click.
+      for (const s of [...menu, gargantua] as Partial<Explorable>[]) {
+        if (!s.onHover || !s.onFocus) continue;
+        s.onHover = (name) => {
+          this.ui.showLabel(name);
+          if (name) this.ctx.audio.uiHover();
+        };
+        s.onFocus = (info) => {
+          if (info) {
+            this.ui.showCard(info);
+            this.ctx.audio.uiSelect();
+          } else {
+            this.ui.hideCard();
+            this.ctx.audio.uiBack();
+          }
+        };
+      }
       this.wireGargantua(gargantua);
     });
     return this.optional;
@@ -226,19 +251,6 @@ export class App {
 
   private wireGargantua(gargantua: Gargantua): void {
     const solar = this.scenes.get<Solar>('solar');
-    gargantua.onHover = (name) => {
-      this.ui.showLabel(name);
-      if (name) this.ctx.audio.uiHover();
-    };
-    gargantua.onFocus = (info) => {
-      if (info) {
-        this.ui.showCard(info);
-        this.ctx.audio.uiSelect();
-      } else {
-        this.ui.hideCard();
-        this.ctx.audio.uiBack();
-      }
-    };
     gargantua.onClock = (rows) => this.ui.setClock(rows);
     gargantua.onLook = (look) => {
       this.ui.setHoleLook(look);
@@ -361,6 +373,32 @@ export class App {
       history.replaceState(history.state, '', url);
     } catch {
       // Some embedded views refuse history changes; the link just stays as it was.
+    }
+  }
+
+  /**
+   * A link to what is on screen. In the built site each scene has its own page (s/<scene>,
+   * made by vite.config.ts) with that scene's picture and text for link previews, which
+   * then opens the scene here; in development the link is just ?scene=….
+   */
+  private async share(): Promise<void> {
+    const scene = this.curious?.name ?? (this.phase === 'final' ? 'solar' : null);
+    const root = location.origin + location.pathname.replace(/(en(\.html)?|index\.html)$/, '');
+    let url = root + (lang === 'en' ? 'en' : '');
+    if (scene && import.meta.env.DEV) url = `${location.origin}${location.pathname}?scene=${scene}`;
+    else if (scene) url = `${root}${lang === 'en' ? 'en/' : ''}s/${scene}`;
+    const title = tr('Народження Всесвіту');
+    try {
+      if (navigator.share && matchMedia('(pointer: coarse)').matches) {
+        await navigator.share({ title, url });
+        return;
+      }
+      await navigator.clipboard.writeText(url);
+      this.ui.showToast(tr('Посилання скопійовано'));
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') return;
+      // No clipboard (an insecure page or a refusal): show the link to copy by hand.
+      this.ui.showToast(url);
     }
   }
 

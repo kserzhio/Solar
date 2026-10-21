@@ -324,3 +324,49 @@ export function buildRingChunks(saturn: PlanetView): THREE.ShaderMaterial {
   saturn.tilt.add(points);
   return material;
 }
+
+/**
+ * Zodiacal light: sunlight scattered by the fine dust spread through the plane of the inner
+ * planets. A thick, flat cloud, thinning outwards; seen edge-on (along the plane) we look
+ * through much more of it, so it glows most there, as the faint band along the ecliptic does
+ * from Earth.
+ */
+export function buildZodiacalLight() {
+  const outer = 17;
+  const geometry = new THREE.CircleGeometry(outer, 160);
+  geometry.rotateX(-Math.PI / 2);
+  const material = new THREE.ShaderMaterial({
+    uniforms: { uFade: { value: 0 } },
+    vertexShader: /* glsl */ `
+      varying vec3 vWorld;
+      varying vec2 vLocal;
+      void main() {
+        vLocal = position.xz;
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vWorld = w.xyz;
+        gl_Position = projectionMatrix * viewMatrix * w;
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform float uFade;
+      varying vec3 vWorld;
+      varying vec2 vLocal;
+      void main() {
+        float r = length(vLocal);
+        float dust = exp(-r / 6.5) * smoothstep(3.6, 7.0, r) * (1.0 - smoothstep(${(outer * 0.7).toFixed(1)}, ${outer.toFixed(1)}, r));
+        // The deeper our line of sight through the slab, the brighter.
+        vec3 toCam = cameraPosition - vWorld;
+        vec3 view = normalize(toCam);
+        float depth = clamp(0.16 / max(abs(view.y), 0.035), 0.5, 2.6);
+        // (Dust right by the camera would be a fog over everything: faded out close up.)
+        float near = smoothstep(1.5, 8.0, length(toCam));
+        gl_FragColor = vec4(vec3(1.0, 0.86, 0.66) * dust * depth * near * uFade * 0.2, 1.0);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.renderOrder = -3;
+  return { mesh, material };
+}

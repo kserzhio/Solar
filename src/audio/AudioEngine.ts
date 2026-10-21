@@ -415,6 +415,119 @@ export class AudioEngine {
     }
   }
 
+  /** One soft bell note at a given pitch (TRAPPIST-1's planets each have their own). */
+  note(freq: number, pan = 0, level = 0.07): void {
+    if (!this.ctx || !this.cuesEnabled) return;
+    const ctx = this.ctx;
+    const t = this.now();
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(0.0001, t);
+    out.gain.exponentialRampToValueAtTime(level, t + 0.01);
+    out.gain.exponentialRampToValueAtTime(0.0001, t + 3.2);
+    const panner = ctx.createStereoPanner();
+    panner.pan.value = Math.max(-1, Math.min(1, pan));
+    out.connect(panner);
+    panner.connect(this.master);
+    panner.connect(this.reverbSend);
+    for (const [mult, amp] of [
+      [1, 1],
+      [2, 0.25],
+      [3.01, 0.08],
+    ] as const) {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = freq * mult;
+      const g = ctx.createGain();
+      g.gain.value = amp;
+      o.connect(g).connect(out);
+      o.start(t);
+      o.stop(t + 3.3);
+    }
+  }
+
+  private futureNodes: AudioScheduledSourceNode[] = [];
+
+  /**
+   * «Майбутнє Сонця», over `seconds` (0 stops it): a calm, warm hum; a deep swelling rumble as
+   * the Sun becomes a giant; a long breath of air as its layers drift off; and a thin, cold,
+   * high tone for the white dwarf left behind.
+   */
+  sunFuture(seconds: number): void {
+    this.futureNodes.forEach((n) => {
+      try {
+        n.stop();
+      } catch {
+        // Already stopped.
+      }
+    });
+    this.futureNodes = [];
+    if (!this.ctx || !this.cuesEnabled || seconds <= 0) return;
+    const ctx = this.ctx;
+    const t = this.now();
+    const k = seconds / 28;
+    const add = (n: AudioScheduledSourceNode) => this.futureNodes.push(n);
+    // Warm hum, then the giant's rumble: low tones under a low-pass that opens and falls.
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(180, t);
+    lp.frequency.exponentialRampToValueAtTime(700, t + 14 * k);
+    lp.frequency.exponentialRampToValueAtTime(120, t + 21 * k);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.18, t + 2 * k);
+    g.gain.exponentialRampToValueAtTime(0.42, t + 14 * k);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 21 * k);
+    lp.connect(g).connect(this.master);
+    g.connect(this.reverbSend);
+    for (const [f0, f1] of [
+      [55, 36],
+      [82.4, 41],
+      [110.5, 55],
+    ] as const) {
+      const o = ctx.createOscillator();
+      o.type = 'sawtooth';
+      o.frequency.setValueAtTime(f0, t);
+      o.frequency.exponentialRampToValueAtTime(f1, t + 14 * k);
+      o.connect(lp);
+      o.start(t);
+      o.stop(t + 21.5 * k);
+      add(o);
+    }
+    // The outer layers going: a long, airy breath.
+    const air = ctx.createBufferSource();
+    air.buffer = this.noiseBuffer;
+    air.loop = true;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 0.8;
+    bp.frequency.setValueAtTime(300, t + 18 * k);
+    bp.frequency.exponentialRampToValueAtTime(2200, t + 24 * k);
+    const ag = ctx.createGain();
+    ag.gain.setValueAtTime(0.0001, t + 18 * k);
+    ag.gain.exponentialRampToValueAtTime(0.16, t + 20 * k);
+    ag.gain.exponentialRampToValueAtTime(0.0001, t + 27 * k);
+    air.connect(bp).connect(ag).connect(this.master);
+    ag.connect(this.reverbSend);
+    air.start(t + 18 * k);
+    air.stop(t + 28 * k);
+    add(air);
+    // The white dwarf: a thin, high, slightly beating tone.
+    for (const f of [1760, 1763]) {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = f;
+      const wg = ctx.createGain();
+      wg.gain.setValueAtTime(0.0001, t + 20.5 * k);
+      wg.gain.exponentialRampToValueAtTime(0.03, t + 22 * k);
+      wg.gain.exponentialRampToValueAtTime(0.0001, t + 28 * k);
+      o.connect(wg).connect(this.master);
+      wg.connect(this.reverbSend);
+      o.start(t + 20.5 * k);
+      o.stop(t + 28.2 * k);
+      add(o);
+    }
+  }
+
   /** Approaching home: the drone returns, brighter and warmer. */
   warm(seconds: number): void {
     if (!this.ctx || !this.cuesEnabled) return;
