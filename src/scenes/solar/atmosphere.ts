@@ -218,60 +218,86 @@ export function buildPlumes(io: THREE.Mesh, radius: number): THREE.ShaderMateria
 }
 
 /**
- * Polar lights: rings of glowing curtains round both magnetic poles (the auroral ovals),
- * where particles from the Sun pour down the field lines into the upper atmosphere. Earth's
- * are green below (oxygen low down) fading to red above; Jupiter's, far bigger and steadier,
- * glow violet-blue. Brightest on the night side, folding and rippling in time.
+ * Polar lights as they look from orbit: a thin glowing oval in the upper atmosphere round
+ * each magnetic pole, brightest on the night side and towards the limb, where the line of
+ * sight runs along the curtains instead of across them. Drawn on a shell just above the
+ * ground, so the planet hides its far side. Colours: the main band and a fainter fringe
+ * higher up (Earth: green oxygen below, red above).
  */
-export function buildAurora(radius: number, low: string, high: string, latitude: number) {
-  const lat = THREE.MathUtils.degToRad(latitude);
+export function buildAurora(
+  radius: number,
+  opts: { main: string; fringe: string; latitude: number; width: number; tilt: number; strength: number },
+) {
   const material = new THREE.ShaderMaterial({
-    uniforms: { uTime: globalUniforms.uTime, uLow: colorUniform(low), uHigh: colorUniform(high), uFade: { value: 0 }, uSun: { value: new THREE.Vector3(1, 0, 0) } },
+    uniforms: {
+      uTime: globalUniforms.uTime,
+      uMain: colorUniform(opts.main),
+      uFringe: colorUniform(opts.fringe),
+      uFade: { value: 0 },
+      uSun: { value: new THREE.Vector3(1, 0, 0) },
+      uLat: { value: THREE.MathUtils.degToRad(opts.latitude) },
+      uWidth: { value: THREE.MathUtils.degToRad(opts.width) },
+      uStrength: { value: opts.strength },
+    },
     vertexShader: /* glsl */ `
-      varying vec2 vUv;
-      varying vec3 vDir;
+      varying vec3 vLocal;
+      varying vec3 vNormalW;
+      varying vec3 vPosW;
       void main() {
-        vUv = uv;
-        vDir = normalize(mat3(modelMatrix) * position);
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        // The magnetic axis leans a little off the spin axis.
+        float c = cos(${opts.tilt.toFixed(4)}), s = sin(${opts.tilt.toFixed(4)});
+        vec3 p = normalize(position);
+        vLocal = vec3(p.x, c * p.y - s * p.z, s * p.y + c * p.z);
+        vNormalW = normalize(mat3(modelMatrix) * normal);
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vPosW = w.xyz;
+        gl_Position = projectionMatrix * viewMatrix * w;
       }`,
     fragmentShader: /* glsl */ `
       uniform float uTime;
-      uniform vec3 uLow;
-      uniform vec3 uHigh;
+      uniform vec3 uMain;
+      uniform vec3 uFringe;
       uniform float uFade;
       uniform vec3 uSun;
-      varying vec2 vUv;
-      varying vec3 vDir;
+      uniform float uLat;
+      uniform float uWidth;
+      uniform float uStrength;
+      varying vec3 vLocal;
+      varying vec3 vNormalW;
+      varying vec3 vPosW;
       void main() {
-        float h = vUv.y;
-        float a = vUv.x * 6.2831853;
-        // Folds of the curtain, drifting and rippling.
-        float folds = 0.55 + 0.45 * sin(a * 9.0 + uTime * 0.6 + sin(a * 3.0 - uTime * 0.4) * 1.5);
-        folds *= 0.6 + 0.4 * sin(a * 23.0 - uTime * 1.3);
-        float rays = 0.7 + 0.3 * sin(a * 140.0 + uTime * 2.0);
-        float body = smoothstep(0.0, 0.08, h) * pow(1.0 - h, 1.6);
-        vec3 col = mix(uLow, uHigh, smoothstep(0.15, 0.85, h));
-        // Faint against the daylit side.
-        float night = mix(1.0, 0.3, smoothstep(-0.2, 0.5, dot(vDir, uSun)));
-        gl_FragColor = vec4(col * folds * rays * body * night * uFade, 1.0);
+        vec3 n = normalize(vNormalW);
+        float sunDot = dot(n, uSun);
+        float night = smoothstep(0.25, -0.2, sunDot);
+        // Magnetic latitude (both hemispheres) and longitude round the pole.
+        float lat = asin(clamp(abs(vLocal.y), 0.0, 1.0));
+        float lon = atan(vLocal.z, vLocal.x);
+        // The oval reaches further from the pole on the night side, and swells and sways.
+        float centre = uLat - uWidth * (1.2 * night + 0.35 * sin(lon * 2.0 + uTime * 0.05));
+        float d = (lat - centre) / uWidth;
+        float band = exp(-d * d);
+        // Higher, fainter fringe on the poleward side.
+        float df = (lat - centre - uWidth * 1.3) / (uWidth * 1.6);
+        float fringe = exp(-df * df) * 0.45;
+        // Folds and fine rays along the oval, drifting slowly.
+        float folds = 0.55 + 0.45 * sin(lon * 7.0 + uTime * 0.25 + 1.4 * sin(lon * 3.0 - uTime * 0.17));
+        float rays = 0.75 + 0.25 * sin(lon * 95.0 + uTime * 1.1 + 3.0 * sin(lon * 13.0));
+        float pulse = 0.85 + 0.15 * sin(uTime * 0.7 + lon * 2.0);
+        // Seen edge-on (near the limb) we look along the curtains: much brighter.
+        vec3 v = normalize(cameraPosition - vPosW);
+        float mu = clamp(abs(dot(n, v)), 0.0, 1.0);
+        float path = min(1.0 / (mu + 0.18), 4.0);
+        float k = (0.06 + 0.94 * night) * folds * rays * pulse * path * uFade * uStrength;
+        vec3 col = (uMain * band + uFringe * fringe) * k;
+        gl_FragColor = vec4(col, 1.0);
       }`,
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
-    side: THREE.DoubleSide,
   });
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius * 1.012, 128, 96), material);
+  mesh.renderOrder = 2;
   const group = new THREE.Group();
-  for (const sign of [1, -1]) {
-    // A slanting band: its foot just above the ground at the oval, its top higher and wider.
-    const bottom = radius * 1.01, top = radius * 1.2;
-    const geo = new THREE.CylinderGeometry(top * Math.cos(lat) * 1.04, bottom * Math.cos(lat), (top - bottom) * Math.sin(lat) + radius * 0.08, 128, 1, true);
-    // Cylinder uv.y runs bottom (0) to top (1); flip for the south so "top" is always up into space.
-    const mesh = new THREE.Mesh(geo, material);
-    mesh.position.y = sign * (bottom * Math.sin(lat) + ((top - bottom) * Math.sin(lat) + radius * 0.08) / 2);
-    if (sign < 0) mesh.rotation.x = Math.PI;
-    mesh.renderOrder = 2;
-    group.add(mesh);
-  }
+  group.add(mesh);
   return { group, material };
 }

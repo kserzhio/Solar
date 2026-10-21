@@ -104,13 +104,13 @@ export class SunFuture implements CuriousScene {
           varying vec3 vView;
           varying vec3 vLocal;
           void main() {
-            float mu = abs(dot(normalize(vN), vView));
+            float mu = min(abs(dot(normalize(vN), vView)), 1.0);
             // A shell seen through: a ring, bright where we look along its edge, the middle
             // almost clear.
             float rim = pow(1.0 - mu, 2.2);
             // Filaments and knots, drawn out radially as the gas streams away.
             vec3 q = vLocal * vec3(3.0, 3.0, 3.0);
-            float fil = pow(1.0 - abs(snoise(q * 1.7 + uTime * 0.02)), 4.0) * 0.6 + pow(1.0 - abs(snoise(q * 4.1 - 3.0)), 6.0) * 0.4;
+            float fil = pow(max(1.0 - abs(snoise(q * 1.7 + uTime * 0.02)), 0.0), 4.0) * 0.6 + pow(max(1.0 - abs(snoise(q * 4.1 - 3.0)), 0.0), 6.0) * 0.4;
             float knots = smoothstep(0.1, 0.8, snoise(q * 0.9 + 5.0) * 0.5 + 0.5);
             vec3 col = mix(vec3(0.25, 0.85, 0.8), vec3(1.0, 0.32, 0.26), smoothstep(0.25, 0.7, rim));
             float a = (0.04 + rim * 0.95) * (0.35 + 0.65 * fil) * (0.55 + 0.45 * knots);

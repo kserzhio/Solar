@@ -182,7 +182,7 @@ export class Trappist implements CuriousScene {
           col = mix(col, vec3(0.88, 0.92, 0.96), uIce * smoothstep(0.55, 0.95, abs(vLocal.y) + land * 0.3 + (1.0 - lit) * 0.4));
           // Lit in the star's red light; the night side keeps a faint glow of its own.
           vec3 light = vec3(1.0, 0.55, 0.32) * lit * 1.6 + vec3(0.05, 0.02, 0.02);
-          float rim = pow(1.0 - max(dot(n, normalize(cameraPosition - vPos)), 0.0), 3.0);
+          float rim = pow(1.0 - clamp(dot(n, normalize(cameraPosition - vPos)), 0.0, 1.0), 3.0);
           gl_FragColor = vec4((col * light + vec3(1.0, 0.5, 0.3) * rim * lit * 0.25) * uFade, 1.0);
         }`,
     });

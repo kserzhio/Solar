@@ -212,12 +212,12 @@ export class Solar implements SceneModule {
     this.loadPlanetTextures();
     this.buildLineup();
     // Polar lights on Earth and Jupiter, seen when we come close.
-    for (const [id, low, high, lat] of [
-      ['earth', '#35ff8a', '#ff4f7a', 67],
-      ['jupiter', '#8f7dff', '#c79bff', 74],
+    for (const [id, opts] of [
+      ['earth', { main: '#3dff8c', fringe: '#ff4a6e', latitude: 68, width: 2.6, tilt: 0.19, strength: 0.55 }],
+      ['jupiter', { main: '#b08cff', fringe: '#ff7ad9', latitude: 75, width: 2.2, tilt: 0.17, strength: 0.45 }],
     ] as const) {
       const p = this.planets.find((q) => q.data.id === id)!;
-      const aurora = buildAurora(p.data.size, low, high, lat);
+      const aurora = buildAurora(p.data.size, opts);
       p.tilt.add(aurora.group);
       this.auroras.push({ planet: p, material: aurora.material });
     }

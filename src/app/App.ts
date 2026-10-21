@@ -105,7 +105,14 @@ export class App {
       stencil: false,
       powerPreference: 'high-performance',
     });
-    this.renderer.setClearColor('#05060a', 1);
+    // The backdrop is the scene's background, not the clear colour: three.js converts the
+    // clear colour for whichever target last ran a render, so the composer's own clear
+    // came out ~13x brighter (sRGB) unless the Sun's noise cube (a linear target) had just
+    // rendered, and the whole frame jumped between a grey haze and deep black whenever that
+    // cube started or stopped (zooming out, the idle turn). The background is converted for
+    // each target as it is drawn.
+    this.renderer.setClearColor('#000000', 1);
+    this.scene.background = new THREE.Color('#05060a');
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.maxDpr));
     this.stage.append(this.renderer.domElement);
 
