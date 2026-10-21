@@ -47,7 +47,7 @@ const EN_META: [string, string][] = [
 
 /**
  * For search engines and link previews (neither runs the app): an English copy of the page
- * (en.html, which Netlify serves at /en) with its own meta tags, each page pointing to the
+ * (en.html, served at /en by the rules in vercel.json and netlify.toml) with its own meta tags, each page pointing to the
  * other with hreflang, plus robots.txt and a sitemap listing both.
  */
 function languages(): Plugin {
