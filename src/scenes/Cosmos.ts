@@ -19,7 +19,7 @@ import {
   sampleGalaxyParticle,
   type GalaxyShape,
 } from './galaxy';
-import { Glow, createStarfield, disposeObject, lerp, smooth } from './util';
+import { Glow, createDeepField, createStarfield, disposeObject, lerp, smooth } from './util';
 
 const VOLUME = { x: 62, y: 30, zMin: -125, zMax: 48 };
 const CAM_START_Z = 78;
@@ -65,6 +65,8 @@ export class Cosmos implements SceneModule {
   private nebulae: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>[] = [];
   private nebulaTargets: THREE.WebGLRenderTarget[] = [];
   private starfield = createStarfield(5000, 320, 3);
+  /** Far galaxies beyond the web, filling in as the galaxies are born. */
+  private deep = createDeepField(4200, 330, 5);
   private unregister: (() => void)[] = [];
   private look = new THREE.Vector3();
   /** The massive cluster that bends background light mid-flight (picked once per run). */
@@ -82,7 +84,7 @@ export class Cosmos implements SceneModule {
     this.quasars = this.buildQuasars();
     this.merger = this.buildMerger();
     this.buildNebulae(rand);
-    this.group.add(this.starfield);
+    this.group.add(this.starfield, this.deep);
   }
 
   // ---------------------------------------------------------------- build
@@ -662,6 +664,8 @@ export class Cosmos implements SceneModule {
     cam.up.set(0, 1, 0);
     cam.lookAt(this.look);
     this.starfield.position.copy(cam.position);
+    this.deep.position.copy(cam.position);
+    this.deep.material.uniforms.uOpacity.value = smooth(0.45, 0.85, p) * 0.85 * fade;
     this.updateLens(p);
   }
 

@@ -125,7 +125,104 @@ function bvColor(bv: number): THREE.Color {
 export interface SkyLabel {
   pos: THREE.Vector3;
   text: string;
-  kind: 'star' | 'constellation';
+  kind: 'star' | 'constellation' | 'galaxy';
+}
+
+/**
+ * The galaxies the naked eye can see, at their real places and sizes: Andromeda (a tilted
+ * spiral with its two little companions) and the two Magellanic Clouds (irregulars, the
+ * Large one with its bar and the pink glow of the Tarantula Nebula). Size: major axis, deg;
+ * ratio: minor / major; pa: position angle of the major axis (from north towards east).
+ */
+const GALAXIES = [
+  { name: 'Туманність Андромеди', ra: 10.685, dec: 41.269, size: 3.2, ratio: 0.32, pa: 35, kind: 0 },
+  { name: 'Велика Магелланова Хмара', ra: 80.894, dec: -69.756, size: 10.8, ratio: 0.85, pa: 170, kind: 1 },
+  { name: 'Мала Магелланова Хмара', ra: 13.187, dec: -72.829, size: 5.3, ratio: 0.58, pa: 45, kind: 2 },
+];
+
+function buildGalaxies(radius: number, uOpacity: { value: number }, labels: SkyLabel[]): THREE.Group {
+  const group = new THREE.Group();
+  const material = new THREE.ShaderMaterial({
+    uniforms: { uOpacity, uKind: { value: 0 } },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv * 2.0 - 1.0;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform float uOpacity;
+      uniform float uKind;
+      varying vec2 vUv;
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5453); }
+      float vnoise(vec2 p) {
+        vec2 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+      }
+      float lumps(vec2 p) { return vnoise(p * 4.0) * 0.6 + vnoise(p * 9.0 + 3.0) * 0.4; }
+      void main() {
+        vec2 p = vUv;
+        float r = length(p);
+        if (r > 1.0) discard;
+        vec3 col;
+        if (uKind < 0.5) {
+          // Andromeda: a bright core, the disk fading out, two dust lanes on the near side,
+          // and M32 and M110 beside it.
+          float disk = exp(-r * 3.4) * 0.55;
+          float core = exp(-r * r * 90.0) * 1.4;
+          float lanes = 1.0 - 0.35 * exp(-pow((r - 0.42) / 0.05, 2.0)) * step(0.0, p.y) - 0.25 * exp(-pow((r - 0.62) / 0.05, 2.0)) * step(0.0, p.y);
+          col = mix(vec3(0.72, 0.8, 1.0), vec3(1.0, 0.86, 0.66), exp(-r * 4.0)) * (disk * lanes + core);
+          col += vec3(1.0, 0.9, 0.75) * (exp(-dot(p - vec2(0.12, -0.32), p - vec2(0.12, -0.32)) * 900.0) * 0.6
+                                        + exp(-dot(p - vec2(-0.42, 0.55), p - vec2(-0.42, 0.55)) * 250.0) * 0.25);
+        } else if (uKind < 1.5) {
+          // Large Magellanic Cloud: a bright bar off-centre in a lumpy glow; the Tarantula.
+          vec2 b = p - vec2(-0.08, 0.02);
+          float bar = exp(-(b.x * b.x * 3.5 + b.y * b.y * 40.0)) * 0.6;
+          float halo = exp(-r * r * 4.5) * (0.35 + 0.65 * lumps(p + 1.7)) * 0.4;
+          col = vec3(0.86, 0.88, 0.96) * (bar + halo);
+          col += vec3(1.0, 0.45, 0.6) * exp(-dot(p - vec2(0.36, 0.2), p - vec2(0.36, 0.2)) * 160.0) * 0.5;
+        } else {
+          // Small Magellanic Cloud: an uneven, slightly bluer smudge.
+          float body = exp(-r * r * 5.0) * (0.3 + 0.7 * lumps(p * 1.3 + 5.0)) * 0.5;
+          col = vec3(0.8, 0.86, 1.0) * body;
+        }
+        col *= smoothstep(1.0, 0.45, r);
+        gl_FragColor = vec4(col * uOpacity * 0.55, 1.0);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+  });
+  for (const g of GALAXIES) {
+    const c = equatorialToScene(g.ra, g.dec);
+    // The sky's own north and east at that place, to set the galaxy's tilt.
+    const north = equatorialToScene(g.ra, g.dec + 0.1).sub(c).normalize();
+    const east = equatorialToScene(g.ra + 0.1, g.dec).sub(c).normalize();
+    const pa = THREE.MathUtils.degToRad(g.pa);
+    const major = north.clone().multiplyScalar(Math.cos(pa)).addScaledVector(east, Math.sin(pa));
+    const minor = new THREE.Vector3().crossVectors(c, major).normalize();
+    const a = radius * Math.tan(THREE.MathUtils.degToRad(g.size / 2));
+    const b = a * g.ratio;
+    const centre = c.clone().multiplyScalar(radius);
+    const corner = (sa: number, sb: number) => centre.clone().addScaledVector(major, a * sa).addScaledVector(minor, b * sb);
+    const v = [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)];
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(v.flatMap((p) => [p.x, p.y, p.z]), 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+    geo.setIndex([0, 1, 2, 0, 2, 3]);
+    const mat = material.clone();
+    mat.uniforms.uOpacity = uOpacity;
+    mat.uniforms.uKind.value = g.kind;
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -5;
+    group.add(mesh);
+    labels.push({ pos: centre.clone(), text: g.name, kind: 'galaxy' });
+  }
+  material.dispose();
+  return group;
 }
 
 /**
@@ -212,8 +309,9 @@ export function createBrightStars(radius = 262) {
   const lines = new THREE.LineSegments(lineGeo, lineMat);
   lines.frustumCulled = false;
 
+  const galaxies = buildGalaxies(radius, uOpacity, labels);
   const group = new THREE.Group();
-  group.add(points, lines);
+  group.add(galaxies, points, lines);
   return {
     group,
     labels,
@@ -231,6 +329,11 @@ export function createBrightStars(radius = 262) {
       lineGeo.dispose();
       (points.material as THREE.Material).dispose();
       lineMat.dispose();
+      galaxies.traverse((o) => {
+        const m = o as THREE.Mesh;
+        m.geometry?.dispose();
+        (m.material as THREE.Material | undefined)?.dispose();
+      });
     },
   };
 }

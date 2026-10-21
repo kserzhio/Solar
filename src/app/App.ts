@@ -697,7 +697,7 @@ export class App {
     this.busy = false;
   }
 
-  private skyTmp: { pos: THREE.Vector3; text: string; kind: 'star' | 'constellation' }[] = [];
+  private skyTmp: { pos: THREE.Vector3; text: string; kind: 'star' | 'constellation' | 'galaxy' }[] = [];
 
   /** Star and constellation names while the figures are on (K). */
   private updateSkyLabels(solar: Solar | null): void {

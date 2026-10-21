@@ -4,7 +4,7 @@ import { config } from '../config';
 import { NOISE, POINT_FRAG, POINT_SIZE, additiveMaterial, gaussian, globalUniforms, mulberry32 } from '../shaders/common';
 import type { Ctx, SceneModule } from '../app/types';
 import type { Solar } from './Solar';
-import { disposeObject, lerp, smooth } from './util';
+import { createDeepField, disposeObject, lerp, smooth } from './util';
 
 const AU_PER_LY = 63241;
 /** Camera distance to the focus point, in world units, while zooming. */
@@ -412,8 +412,12 @@ export class CosmicZoom implements SceneModule {
     line.frustumCulled = false;
     this.voyager.add(line);
     this.voyager.visible = false;
-    this.group.add(this.voyager);
+    this.deep.visible = false;
+    this.group.add(this.voyager, this.deep);
   }
+
+  /** Far galaxies behind everything, once we are out past the Milky Way. */
+  private deep = createDeepField(5000, 3000, 23);
 
   /** Visibility of the Voyager overlay: just past the Kuiper belt, before the Oort cloud. */
   private voyagerWeight(z: number): number {
@@ -1035,6 +1039,7 @@ export class CosmicZoom implements SceneModule {
     solar.orbitControls.enableZoom = true;
     solar.orbitControls.target.set(0, 0, 0);
     for (const l of this.levels) l.group.visible = false;
+    this.deep.visible = false;
     this.voyager.visible = false;
     this.setMotion(false);
     this.galaxyTurn = 0;
@@ -1103,6 +1108,10 @@ export class CosmicZoom implements SceneModule {
         }
         for (const lm of l.lines) lm.opacity = w * 0.25;
       });
+      const far = Math.max(this.weight(3, this.z), this.weight(4, this.z) * 0.8, this.weight(5, this.z) * 0.5);
+      this.deep.visible = far > 0.002;
+      this.deep.material.uniforms.uOpacity.value = far * 0.75;
+      this.deep.position.copy(this.ctx.camera.position);
 
       // Keep the camera at a fixed distance from a focus that glides from the Sun to
       // the galactic centre and on to the Local Group; the user can still orbit.

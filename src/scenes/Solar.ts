@@ -736,7 +736,7 @@ export class Solar implements SceneModule {
   }
 
   /** Names of bright stars and constellations, as world positions (follow the camera). */
-  skyLabels(out: { pos: THREE.Vector3; text: string; kind: 'star' | 'constellation' }[]): void {
+  skyLabels(out: { pos: THREE.Vector3; text: string; kind: 'star' | 'constellation' | 'galaxy' }[]): void {
     out.length = 0;
     const origin = this.brightStars.group.position;
     for (const l of this.brightStars.labels) out.push({ pos: this.tmp.copy(l.pos).add(origin).clone(), text: l.text, kind: l.kind });

@@ -107,6 +107,106 @@ export function createStarfield(count: number, radius: number, seed = 1) {
   return points;
 }
 
+/**
+ * A deep field: thousands of faint, far galaxies on a sphere round the camera, as in the
+ * Hubble Deep Field — red-gold ellipticals, spirals with a warm core in a bluish disk (some
+ * edge-on, as thin streaks), and blue, lumpy irregulars; the farthest smaller and redder.
+ * Each point sprite draws its galaxy's own shape, turned and squashed at random.
+ */
+export function createDeepField(count: number, radius: number, seed = 1) {
+  let s = seed;
+  const rand = () => {
+    s = (s * 16807) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+  const positions = new Float32Array(count * 3);
+  const shape = new Float32Array(count * 4);
+  const look = new Float32Array(count * 2);
+  for (let i = 0; i < count; i++) {
+    const u = rand() * 2 - 1;
+    const phi = rand() * Math.PI * 2;
+    const q = Math.sqrt(1 - u * u);
+    positions.set([q * Math.cos(phi) * radius, u * radius, q * Math.sin(phi) * radius], i * 3);
+    const kind = rand(); // < 0.3 elliptical, < 0.82 spiral, else irregular
+    const far = rand() ** 0.6; // farther: smaller, fainter, redder
+    // Type, angle on the sky, axis ratio (spirals often seen tilted, sometimes edge-on), size.
+    const ratio = kind < 0.3 ? 0.55 + rand() * 0.45 : kind < 0.82 ? 0.12 + rand() * 0.88 : 0.45 + rand() * 0.5;
+    shape.set([kind, rand() * Math.PI, ratio, (1 - far * 0.75) * (0.4 + rand() ** 3 * 1.6)], i * 4);
+    look.set([far, rand()], i * 2);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('aShape', new THREE.BufferAttribute(shape, 4));
+  geometry.setAttribute('aLook', new THREE.BufferAttribute(look, 2));
+  const material = new THREE.ShaderMaterial({
+    uniforms: { uOpacity: { value: 1 }, uViewScale: globalUniforms.uViewScale },
+    vertexShader: /* glsl */ `
+      ${POINT_SIZE}
+      uniform float uOpacity;
+      attribute vec4 aShape;
+      attribute vec2 aLook;
+      varying vec4 vShape;
+      varying vec2 vLook;
+      varying float vAlpha;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vShape = aShape;
+        vLook = aLook;
+        vAlpha = uOpacity * (1.0 - aLook.x * 0.6);
+        float size = (0.009 + aShape.w * 0.022) * length(position);
+        gl_PointSize = max(pointSize(size, -mv.z, vAlpha), 3.0);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */ `
+      varying vec4 vShape;
+      varying vec2 vLook;
+      varying float vAlpha;
+      void main() {
+        vec2 c = gl_PointCoord * 2.0 - 1.0;
+        float ca = cos(vShape.y), sa = sin(vShape.y);
+        c = vec2(ca * c.x - sa * c.y, sa * c.x + ca * c.y);
+        c.y /= max(vShape.z, 0.08);
+        float r = length(c);
+        if (r > 1.0) discard;
+        float kind = vShape.x;
+        vec3 warm = vec3(1.0, 0.78, 0.55);
+        vec3 col;
+        float a;
+        if (kind < 0.3) {
+          // Elliptical: a smooth glow, brightest in the middle.
+          a = exp(-r * r * 9.0) * 0.6;
+          col = warm;
+        } else if (kind < 0.82) {
+          // Spiral: a warm bulge in a bluish disk with a hint of two arms.
+          float th = atan(c.y, c.x);
+          float arms = 0.65 + 0.35 * cos(2.0 * th - 6.0 * log(r + 0.05) + vLook.y * 6.28);
+          float disk = exp(-r * 3.4) * arms;
+          float bulge = exp(-r * r * 40.0);
+          a = disk * 0.8 + bulge;
+          col = mix(vec3(0.62, 0.74, 1.0), warm, bulge / (a + 1e-3));
+        } else {
+          // Irregular: blue, a few clumps of young stars scattered off-centre.
+          float k = vLook.y * 6.283;
+          vec2 o1 = 0.35 * vec2(cos(k), sin(k));
+          vec2 o2 = 0.4 * vec2(cos(k * 2.3 + 2.0), sin(k * 1.7 + 1.0));
+          a = exp(-dot(c - o1, c - o1) * 7.0) + 0.7 * exp(-dot(c - o2, c - o2) * 12.0) + 0.35 * exp(-r * r * 3.0);
+          a *= 0.8;
+          col = vec3(0.58, 0.72, 1.0);
+        }
+        // The far ones redshifted.
+        col = mix(col, col * vec3(1.15, 0.75, 0.55), vLook.x * 0.8);
+        gl_FragColor = vec4(col * a * vAlpha * 1.4, 1.0);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const points = new THREE.Points(geometry, material);
+  points.frustumCulled = false;
+  points.renderOrder = -6;
+  return points;
+}
+
 export const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 export const smooth = (a: number, b: number, x: number) => {
   const t = clamp01((x - a) / (b - a));

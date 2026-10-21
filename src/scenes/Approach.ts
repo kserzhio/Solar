@@ -4,7 +4,7 @@ import { NOISE, POINT_FRAG, POINT_SIZE, additiveMaterial, colorUniform, gaussian
 import type { Ctx, SceneModule } from '../app/types';
 import { ASTEROID_BELT, OVERVIEW, PLANETS, planetAngle } from '../data/planets';
 import { GALAXY_VERT_COMMON, HERO_SHAPE, HERO_SPIN, heroStarLocal, sampleDustParticle, sampleGalaxyParticle } from './galaxy';
-import { Glow, createStarfield, disposeObject, lerp, smooth } from './util';
+import { Glow, createDeepField, createStarfield, disposeObject, lerp, smooth } from './util';
 
 /** Progress at which the dive into the arm hands over to the young star's disk. */
 const CUT = 0.56;
@@ -31,6 +31,8 @@ export class Approach implements SceneModule {
   private star = new Glow('#fff1d6', 1, 2.4);
   private youngSun = new Glow('#ffd59a', 9, 3.2);
   private starfield = createStarfield(4000, 300, 9);
+  /** Far galaxies behind ours, left behind as we dive into it. */
+  private deep = createDeepField(3200, 310, 11);
   private unregister: (() => void)[] = [];
 
   private startPos = new THREE.Vector3();
@@ -70,7 +72,7 @@ export class Approach implements SceneModule {
       this.envelopes.push({ glow, planet: i });
       this.diskGroup.add(glow);
     });
-    this.group.add(this.galaxyGroup, this.diskGroup, this.starfield);
+    this.group.add(this.galaxyGroup, this.diskGroup, this.starfield, this.deep);
   }
 
   private buildGalaxy(): THREE.ShaderMaterial {
@@ -425,12 +427,15 @@ export class Approach implements SceneModule {
       this.cutDir.subVectors(cam.position, this.starWorld).normalize();
       this.cutAngular = glowSize / Math.max(d, 1e-4);
       this.starfield.position.copy(cam.position);
+      this.deep.position.copy(cam.position);
+      this.deep.material.uniforms.uOpacity.value = 0.8 * (1 - smooth(0.25, 0.75, q));
       this.lastP = p;
       return;
     }
 
     // ---- Disk phase, around the young Sun at the origin.
     this.galaxyGroup.visible = false;
+    this.deep.material.uniforms.uOpacity.value = 0;
     this.diskGroup.visible = true;
     const q = (p - CUT) / (1 - CUT);
     if (this.lastP < CUT) this.ctx.orbitClock.t = 0;

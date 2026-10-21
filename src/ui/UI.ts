@@ -699,7 +699,7 @@ export class UI {
   }
 
   /** Names of bright stars and constellations (K). */
-  setSkyLabels(labels: { x: number; y: number; text: string; kind: 'star' | 'constellation'; opacity: number }[]): void {
+  setSkyLabels(labels: { x: number; y: number; text: string; kind: 'star' | 'constellation' | 'galaxy'; opacity: number }[]): void {
     while (this.skyPool.length < labels.length) {
       const n = el('div', 'sky-label');
       this.skyLayer.append(n);

@@ -967,6 +967,7 @@ button { font: inherit; color: inherit; }
   text-shadow: 0 0 8px rgba(5, 6, 10, 0.95);
 }
 .sky-label--star { margin: 6px 0 0 9px; font-size: 10px; letter-spacing: 0.08em; color: rgba(233, 236, 245, 0.6); }
+.sky-label--galaxy { margin: 10px 0 0 12px; font-size: 10px; letter-spacing: 0.12em; font-style: italic; color: rgba(255, 217, 160, 0.7); }
 .sky-label--constellation {
   transform-origin: 0 0;
   margin-left: -40px;
