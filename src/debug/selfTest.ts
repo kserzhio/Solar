@@ -75,6 +75,7 @@ export async function runSelfTest(app: AppInternals): Promise<SelfTestResult[]> 
   };
 
   try {
+    await app.loadOptional();
     // ---- The film, at key moments.
     app.ctx.audio.cuesEnabled = false;
     const end = app.director.endTime as number;

@@ -38,8 +38,9 @@ const LINEUP_EARTH = 0.55;
 const BUMP = 0.035;
 /** Colour maps per body (public/textures/planets). Pluto has none and stays procedural. */
 const PLANET_MAPS: Record<string, string> = {
-  mercury: 'mercury.jpg', venus: 'venus.jpg', mars: 'mars.jpg', jupiter: 'jupiter.jpg', saturn: 'saturn.jpg',
-  uranus: 'uranus.jpg', neptune: 'neptune.jpg', ceres: 'ceres.jpg', eris: 'eris.jpg',
+  // (WebP where it is much smaller; the cratered bodies keep JPEG, which WebP does not beat.)
+  mercury: 'mercury.jpg', venus: 'venus.webp', mars: 'mars.webp', jupiter: 'jupiter.webp', saturn: 'saturn.webp',
+  uranus: 'uranus.webp', neptune: 'neptune.webp', ceres: 'ceres.jpg', eris: 'eris.jpg',
 };
 const MOON_MAPS: Record<string, string> = { 'Місяць': 'moon.jpg' };
 const MOON_CRATERS: Record<string, number> = { 'Місяць': 1, 'Іо': 0, 'Європа': 0.12, 'Ганімед': 0.55, 'Каллісто': 1, 'Титан': 0 };
@@ -854,10 +855,10 @@ export class Solar implements SceneModule {
     const base = `${import.meta.env.BASE_URL}textures/earth/`;
     const maxAniso = this.ctx.renderer.capabilities.getMaxAnisotropy();
     const maps: [string, string, boolean][] = [
-      ['uDay', 'day.jpg', true],
-      ['uNight', 'night.png', true],
-      ['uWater', 'water.jpg', false],
-      ['uCloudTex', 'clouds.png', false],
+      ['uDay', 'day.webp', true],
+      ['uNight', 'night.webp', true],
+      ['uWater', 'water.webp', false],
+      ['uCloudTex', 'clouds.webp', false],
     ];
     let left = maps.length;
     for (const [key, file, srgb] of maps) {

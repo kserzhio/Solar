@@ -19,7 +19,7 @@ import {
   sampleGalaxyParticle,
   type GalaxyShape,
 } from './galaxy';
-import { createStarfield, disposeObject, lerp, smooth } from './util';
+import { Glow, createStarfield, disposeObject, lerp, smooth } from './util';
 
 const VOLUME = { x: 62, y: 30, zMin: -125, zMax: 48 };
 const CAM_START_Z = 78;
@@ -49,6 +49,12 @@ export class Cosmos implements SceneModule {
 
   private nodes: Node[] = [];
   private pings: Ping[] = [];
+  /**
+   * The very first stars and the bubbles they blow in the dark gas: their ultraviolet light
+   * splits the hydrogen around them (reionization), a glowing sphere that swells and fades
+   * as more and more of them join up.
+   */
+  private bubbles: { glow: Glow; ignite: number }[] = [];
   private nextPing = 0;
   private web: THREE.ShaderMaterial;
   private stars: THREE.ShaderMaterial;
@@ -197,6 +203,11 @@ export class Cosmos implements SceneModule {
         v.set((rand() * 2 - 1) * 20, (rand() * 2 - 1) * 10 + 3, lerp(18, 46, rand()));
         ignite = 0.03 + i * 0.03;
         size = 0.55;
+        const glow = new Glow(i % 3 === 0 ? '#9fb6ff' : '#b8a8ff', 1, 2.4);
+        glow.position.copy(v);
+        glow.visible = false;
+        this.bubbles.push({ glow, ignite });
+        this.group.add(glow);
         this.pings.push({ at: ignite, pan: THREE.MathUtils.clamp(v.x / 20, -1, 1) });
       } else {
         const node = this.nodes[Math.floor(rand() * this.nodes.length)];
@@ -609,7 +620,8 @@ export class Cosmos implements SceneModule {
     this.quasars.uniforms.uFade.value = this.params.fade;
     this.merger.uniforms.uProgress.value = p;
     this.merger.uniforms.uFade.value = this.params.fade;
-    this.web.uniforms.uFade.value = smooth(0.0, 0.3, p) * fade;
+    // The gas is there from the first moment, dim (the Dark Ages), then gathers into the web.
+    this.web.uniforms.uFade.value = (0.45 + 0.55 * smooth(0.0, 0.3, p)) * fade;
     this.stars.uniforms.uProgress.value = p;
     this.stars.uniforms.uFade.value = fade;
     this.galaxies.uniforms.uProgress.value = p;
@@ -618,6 +630,15 @@ export class Cosmos implements SceneModule {
     (this.starfield.material as THREE.ShaderMaterial).uniforms.uOpacity.value = smooth(0.1, 0.5, p) * 0.7 * fade;
 
     const cam = this.ctx.camera;
+    const duration = this.stars.uniforms.uDuration.value as number;
+    for (const b of this.bubbles) {
+      const age = (p - b.ignite) * duration;
+      b.glow.visible = age > 0 && fade > 0.01;
+      if (!b.glow.visible) continue;
+      b.glow.scale.setScalar(lerp(1.5, 22, 1 - Math.exp(-age * 0.3)));
+      b.glow.intensity = 0.32 * smooth(0, 0.6, age) * Math.exp(-age * 0.16) * fade;
+      b.glow.quaternion.copy(cam.quaternion);
+    }
     for (const n of this.nebulae) {
       const { appear, strength } = n.userData as { appear: number; strength: number };
       n.material.uniforms.uOpacity.value = smooth(appear, appear + 0.25, p) * strength * fade;

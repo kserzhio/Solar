@@ -2,13 +2,22 @@ import { EN } from './en';
 
 /**
  * Interface language. The site is written in Ukrainian; English comes from a dictionary
- * keyed by the Ukrainian text (en.ts), looked up where text reaches the screen. The choice
- * is kept in the URL (?lang=en) and in localStorage; Ukrainian is the default.
+ * keyed by the Ukrainian text (en.ts), looked up where text reaches the screen. English has
+ * its own address, /en (a copy of the page with English meta tags, made at build time);
+ * ?lang=en works too (and in development), and the choice is kept in localStorage.
+ * Ukrainian is the default.
  */
 export type Lang = 'uk' | 'en';
 
+/** The English page's address: /en (or en.html), next to the Ukrainian one. */
+const EN_PATH = /\/en(\.html)?$/;
+
 function detect(): Lang {
   try {
+    if (EN_PATH.test(location.pathname)) {
+      localStorage.setItem('lang', 'en');
+      return 'en';
+    }
     const q = new URLSearchParams(location.search).get('lang');
     if (q === 'uk' || q === 'en') {
       localStorage.setItem('lang', q);
@@ -52,7 +61,14 @@ export function setLang(next: Lang): void {
     // The URL carries it anyway.
   }
   const url = new URL(location.href);
-  url.searchParams.set('lang', next);
+  url.searchParams.delete('lang');
+  if (import.meta.env.DEV) {
+    url.searchParams.set('lang', next);
+  } else {
+    // The other language's own page, beside this one.
+    const dir = url.pathname.replace(EN_PATH, '/').replace(/[^/]*$/, '');
+    url.pathname = next === 'en' ? `${dir}en` : dir;
+  }
   location.href = url.toString();
 }
 

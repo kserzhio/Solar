@@ -1,3 +1,9 @@
 [build]
   command = "npm run build"
   publish = "dist"
+
+# The English page (made at build time as en.html).
+[[redirects]]
+  from = "/en"
+  to = "/en.html"
+  status = 200

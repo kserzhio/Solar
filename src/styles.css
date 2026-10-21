@@ -500,6 +500,9 @@ button { font: inherit; color: inherit; }
 .narrow__text { text-align: center; }
 .narrow__title { font-size: 20px; font-weight: 200; letter-spacing: 0.12em; margin-bottom: 10px; }
 .narrow__sub { font-size: 12px; letter-spacing: 0.1em; color: var(--fg-dim); }
+.lost { z-index: 60; background: #05060a; }
+.lost__reload { margin-top: 22px; border-color: var(--line); display: none; }
+.lost.is-stuck .lost__reload { display: inline-flex; }
 
 /* planet hover label */
 .planet-label {
@@ -760,11 +763,30 @@ button { font: inherit; color: inherit; }
   pointer-events: none;
   z-index: 20;
 }
+.photo-hint { display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 18px; }
+.photo-hint.is-on button { pointer-events: auto; }
+.photo-hint button {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+  transition: color 0.3s, border-color 0.3s;
+}
+.photo-hint button:hover, .photo-hint button:focus-visible { color: var(--fg); border-color: var(--line); outline: none; }
+.photo-hint button[data-act="save"] { color: var(--accent); }
 .photo-hint kbd {
   font: inherit;
   font-size: 9px;
   padding: 1px 5px;
-  margin: 0 2px 0 6px;
+  margin: 0 0 0 8px;
   border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--fg);
@@ -919,7 +941,7 @@ button { font: inherit; color: inherit; }
 .is-curious .timeline,
 .is-curious .here,
 .is-curious .planet-label,
-.is-curious .controls .btn:not(.is-on):not(:first-child):not(:last-child) { opacity: 0 !important; pointer-events: none !important; }
+.is-curious .controls .btn:not(.is-on):not(.btn--keep):not(:first-child):not(:last-child) { opacity: 0 !important; pointer-events: none !important; }
 .is-curious.is-explorable .card.is-visible { opacity: 1 !important; pointer-events: auto !important; }
 .is-curious.is-explorable .planet-label.is-visible { opacity: 1 !important; }
 /* Hidden controls give up their room, so the row still fits narrow windows with «Для допитливих». */

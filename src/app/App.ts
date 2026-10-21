@@ -12,12 +12,8 @@ import { Cosmos } from '../scenes/Cosmos';
 import { Approach } from '../scenes/Approach';
 import { Solar } from '../scenes/Solar';
 import { CosmicZoom } from '../scenes/CosmicZoom';
-import { Nucleosynthesis } from '../scenes/Nucleosynthesis';
-import { Supernova } from '../scenes/Supernova';
-import { MoonBirth } from '../scenes/MoonBirth';
-import { Pulsar } from '../scenes/Pulsar';
 import { CURIOUS, type CuriousName, type CuriousScene } from '../scenes/curious';
-import { Gargantua } from '../scenes/Gargantua';
+import type { Gargantua } from '../scenes/Gargantua';
 import { Director } from './Director';
 import { PerfMonitor } from './PerfMonitor';
 import { Post } from './Post';
@@ -31,7 +27,7 @@ type Phase = 'intro' | 'cinematic' | 'final';
 /** Quality steps used by the FPS watchdog: particle share, bloom mip levels, max pixel ratio. */
 /** Scenes compiled before the start screen, and those compiled in the background after. */
 const FIRST_SCENES = ['bang', 'plasma', 'cosmos'] as const;
-const LATER_SCENES = ['approach', 'solar', 'zoom', 'nucleo', 'supernova', 'moon', 'pulsar', 'gargantua'] as const;
+const LATER_SCENES = ['approach', 'solar', 'zoom', 'nucleo', 'supernova', 'moon', 'pulsar', 'merger', 'sunfuture', 'trappist', 'gargantua'] as const;
 type SceneName = (typeof FIRST_SCENES)[number] | (typeof LATER_SCENES)[number];
 
 const QUALITY_STEPS = [
@@ -147,6 +143,10 @@ export class App {
       onCurious: () => this.toggleCurious(),
       onCuriousScene: (name) => void this.openCurious(name),
       onHoleLook: (look) => this.scenes.get<Gargantua>('gargantua').setLook(look),
+      onPhoto: () => {
+        if (this.phase !== 'intro') this.ui.setPhotoMode(!this.ui.photoMode);
+      },
+      onSaveFrame: () => this.saveFrame(),
       seekLabel: (f) => formatCosmicTime(this.director.cosmicSeconds(f * this.director.endTime)),
     });
 
@@ -169,11 +169,7 @@ export class App {
     [new Singularity(this.ctx), new BigBang(this.ctx), new Plasma(this.ctx), new Cosmos(this.ctx), new Approach(this.ctx), solar, zoom].forEach(
       (s) => this.scenes.add(s),
     );
-    for (const s of [new Nucleosynthesis(this.ctx), new Supernova(this.ctx), new MoonBirth(this.ctx), new Pulsar(this.ctx), new Gargantua(this.ctx)]) {
-      s.onCaption = (text, hold) => this.ui.showCaption(text, hold);
-      s.onFlash = () => this.ui.flash(this.ctx.reducedMotion);
-      this.scenes.add(s);
-    }
+    this.optional = null;
     solar.onHover = (p) => {
       this.ui.showLabel(p ? p.name : null);
       if (p) this.ctx.audio.uiHover();
@@ -183,33 +179,15 @@ export class App {
       if (on) this.ctx.audio.uiHover();
     };
     // «Інтерстелар»: through the wormhole to Gargantua (or straight back if that cannot start).
-    const gargantua = this.scenes.get<Gargantua>('gargantua');
-    gargantua.onHover = (name) => {
-      this.ui.showLabel(name);
-      if (name) this.ctx.audio.uiHover();
-    };
-    gargantua.onFocus = (info) => {
-      if (info) {
-        this.ui.showCard(info);
-        this.ctx.audio.uiSelect();
-      } else {
-        this.ui.hideCard();
-        this.ctx.audio.uiBack();
-      }
-    };
-    gargantua.onClock = (rows) => this.ui.setClock(rows);
-    gargantua.onLook = (look) => {
-      this.ui.setHoleLook(look);
-      if (look) this.ctx.audio.uiSelect();
-    };
-    gargantua.exitQuat = () => solar.portalExit;
     solar.onWormhole = () => {
-      if (this.busy || this.phase !== 'final' || this.curious) {
-        solar.returnFromWormhole(1.5);
-        return;
-      }
-      gargantua.entry = solar.portalEntry;
-      void this.openCurious('gargantua');
+      void this.loadOptional().then(() => {
+        if (this.busy || this.phase !== 'final' || this.curious) {
+          solar.returnFromWormhole(1.5);
+          return;
+        }
+        this.scenes.get<Gargantua>('gargantua').entry = solar.portalEntry;
+        void this.openCurious('gargantua');
+      });
     };
     solar.onTour = (on) => this.ui.setTour(on);
     solar.onDrift = (on) => this.ui.setDrift(on || zoom.motion);
@@ -230,6 +208,45 @@ export class App {
     this.ui.setTicks(this.director.ticks());
   }
 
+  /** The optional scenes' chunk, loaded and registered (once per set of scenes). */
+  private optional: Promise<void> | null = null;
+
+  private loadOptional(): Promise<void> {
+    this.optional ??= import('../scenes/optional').then(({ createOptionalScenes }) => {
+      const { menu, gargantua } = createOptionalScenes(this.ctx);
+      for (const s of [...menu, gargantua]) {
+        s.onCaption = (text, hold) => this.ui.showCaption(text, hold);
+        s.onFlash = () => this.ui.flash(this.ctx.reducedMotion);
+        this.scenes.add(s);
+      }
+      this.wireGargantua(gargantua);
+    });
+    return this.optional;
+  }
+
+  private wireGargantua(gargantua: Gargantua): void {
+    const solar = this.scenes.get<Solar>('solar');
+    gargantua.onHover = (name) => {
+      this.ui.showLabel(name);
+      if (name) this.ctx.audio.uiHover();
+    };
+    gargantua.onFocus = (info) => {
+      if (info) {
+        this.ui.showCard(info);
+        this.ctx.audio.uiSelect();
+      } else {
+        this.ui.hideCard();
+        this.ctx.audio.uiBack();
+      }
+    };
+    gargantua.onClock = (rows) => this.ui.setClock(rows);
+    gargantua.onLook = (look) => {
+      this.ui.setHoleLook(look);
+      if (look) this.ctx.audio.uiSelect();
+    };
+    gargantua.exitQuat = () => solar.portalExit;
+  }
+
   start(): void {
     this.scenes.enter('singularity');
     this.renderer.setAnimationLoop(this.frame);
@@ -240,7 +257,8 @@ export class App {
       this.ready = true;
       hideBoot();
       this.ui.showIntro();
-      void this.precompile(LATER_SCENES);
+      void this.loadOptional().then(() => this.precompile(LATER_SCENES));
+      void this.openDeepLink();
     });
     if (import.meta.env.DEV) {
       // Dev helper for inspecting a frame at a given timeline time: __goTo(seconds).
@@ -316,9 +334,41 @@ export class App {
     }
   }
 
+  /**
+   * A link straight to a scene (?scene=solar, ?scene=gargantua, ?scene=pulsar, …): skip the
+   * film to the Solar System and, for a scene of «Для допитливих» or Gargantua, open it.
+   */
+  private async openDeepLink(): Promise<void> {
+    const name = new URLSearchParams(location.search).get('scene');
+    if (!name) return;
+    const curious = name === 'gargantua' || CURIOUS.some((c) => c.name === name);
+    if (name !== 'solar' && !curious) return;
+    if (curious) await this.loadOptional();
+    await this.skipToFinal();
+    if (!curious) return;
+    // Let the arrival settle (the veil lifting, the title) before the scene.
+    await new Promise((r) => window.setTimeout(r, 700));
+    if (name === 'gargantua') this.scenes.get<Gargantua>('gargantua').entry = this.scenes.get<Solar>('solar').portalEntry;
+    void this.openCurious(name as CuriousName);
+  }
+
+  /** Keeps the scene on screen in the address (?scene=…), so the link can be shared. */
+  private setSceneParam(name: string | null): void {
+    try {
+      const url = new URL(location.href);
+      if (name) url.searchParams.set('scene', name);
+      else url.searchParams.delete('scene');
+      history.replaceState(history.state, '', url);
+    } catch {
+      // Some embedded views refuse history changes; the link just stays as it was.
+    }
+  }
+
   /** Compile scenes' shaders ahead of time so transitions don't hitch. */
   private async precompile(names: readonly SceneName[] = [...FIRST_SCENES, ...LATER_SCENES], onProgress?: (fraction: number) => void): Promise<void> {
     for (let i = 0; i < names.length; i++) {
+      // (The optional scenes are compiled once their chunk has loaded.)
+      if (!this.scenes.has(names[i])) continue;
       const group = this.scenes.get(names[i]).group;
       // A scene already on screen (reached before its turn came) has compiled as it showed;
       // moving its group here would take it off the screen.
@@ -358,6 +408,20 @@ export class App {
 
   private bindEvents(): void {
     const canvas = this.ctx.canvas;
+    // If the graphics driver resets, the page loses its WebGL context and would sit black.
+    // Say so; when the context comes back, reload (on the same scene: ?scene= is kept in the
+    // address), which rebuilds every shader and texture cleanly.
+    let stuck = 0;
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.renderer.setAnimationLoop(null);
+      this.ui.setContextLost(true);
+      stuck = window.setTimeout(() => this.ui.setContextLost(true, true), 4000);
+    });
+    canvas.addEventListener('webglcontextrestored', () => {
+      window.clearTimeout(stuck);
+      location.reload();
+    });
     const p = this.ctx.pointer;
     const setPointer = (e: PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
@@ -495,7 +559,7 @@ export class App {
       this.ui.setCuriousMenu(false);
       return true;
     }
-    const n = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(e.code);
+    const n = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'].indexOf(e.code);
     if (n >= 0 && n < CURIOUS.length) {
       void this.openCurious(CURIOUS[n].name);
       return true;
@@ -514,6 +578,7 @@ export class App {
    * hidden, the camera pose is kept, and everything is put back exactly afterwards.
    */
   private async openCurious(name: CuriousName): Promise<void> {
+    if (!this.scenes.has(name)) await this.loadOptional();
     const solar = this.scenes.get<Solar>('solar');
     if (this.busy || this.phase !== 'final' || this.curious) return;
     const scene = this.scenes.get<CuriousScene>(name);
@@ -538,6 +603,7 @@ export class App {
     this.ui.clearCaption();
     this.ui.setCurious(true, !!scene.interactive);
     this.scenes.enter(name);
+    this.setSceneParam(name);
     this.post.setGrade(name === 'moon' ? 'approach' : 'cosmos', 0);
     this.perf.hold(1);
     if (!scene.seamless) await this.ui.veil(0, 0.6);
@@ -566,6 +632,7 @@ export class App {
     if (!c) return;
     this.curious = null;
     this.scenes.exit(c.name);
+    this.setSceneParam(null);
     c.hidden.forEach((o) => (o.visible = true));
     this.camera.position.copy(c.pos);
     this.camera.quaternion.copy(c.quat);
@@ -885,7 +952,7 @@ export class App {
     this.ctx.audio.reset();
     if (JSON.stringify([config.particles, config.particleScale]) !== this.particleSignature) {
       this.buildScenes();
-      void this.precompile();
+      void this.loadOptional().then(() => this.precompile());
     }
     this.ctx.orbitClock.t = 0;
     this.phase = 'intro';

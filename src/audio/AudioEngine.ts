@@ -630,6 +630,58 @@ export class AudioEngine {
     src.stop(t + 1.7);
   }
 
+  private chirpNodes: AudioScheduledSourceNode[] = [];
+
+  /**
+   * Two black holes merging in `seconds`: the gravitational-wave "chirp", made audible as
+   * LIGO's scientists did — a low tone sweeping up ever faster to the merger, then a short
+   * ring-down. chirp(0) stops it.
+   */
+  chirp(seconds: number): void {
+    this.chirpNodes.forEach((n) => {
+      try {
+        n.stop();
+      } catch {
+        // Already stopped.
+      }
+    });
+    this.chirpNodes = [];
+    if (!this.ctx || !this.cuesEnabled || seconds <= 0) return;
+    const ctx = this.ctx;
+    const t = this.now();
+    const steps = 96;
+    const freq = new Float32Array(steps);
+    // Frequency ∝ (1 − t/tc)^−3/8, from 28 Hz to about 300 Hz.
+    for (let i = 0; i < steps; i++) freq[i] = Math.min(300, 28 * Math.pow(1 - Math.min(i / (steps - 1), 0.9985), -3 / 8));
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueCurveAtTime(freq, t, seconds);
+    o.frequency.setTargetAtTime(240, t + seconds, 0.05);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.12, t + 2);
+    g.gain.exponentialRampToValueAtTime(0.45, t + seconds - 0.05);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + seconds + 0.6);
+    o.connect(g).connect(this.master);
+    g.connect(this.reverbSend);
+    o.start(t);
+    o.stop(t + seconds + 0.7);
+    // The thump of the merger itself.
+    const thump = ctx.createOscillator();
+    thump.type = 'sine';
+    thump.frequency.setValueAtTime(70, t + seconds);
+    thump.frequency.exponentialRampToValueAtTime(30, t + seconds + 1.2);
+    const tg = ctx.createGain();
+    tg.gain.setValueAtTime(0.0001, t + seconds);
+    tg.gain.exponentialRampToValueAtTime(0.6, t + seconds + 0.04);
+    tg.gain.exponentialRampToValueAtTime(0.0001, t + seconds + 1.4);
+    thump.connect(tg).connect(this.master);
+    tg.connect(this.reverbSend);
+    thump.start(t + seconds);
+    thump.stop(t + seconds + 1.5);
+    this.chirpNodes = [o, thump];
+  }
+
   private throat: { gain: GainNode; nodes: AudioScheduledSourceNode[] } | null = null;
 
   /**

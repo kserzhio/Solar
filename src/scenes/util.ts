@@ -252,13 +252,12 @@ export function createMilkyWay(renderer: THREE.WebGLRenderer, radius = 280) {
   mesh.frustumCulled = false;
   mesh.renderOrder = -6;
 
-  // Swap the procedural band for the photographic panorama once it has arrived. The 8K file
-  // is decoded and scaled to 4K off the main thread: plenty for a backdrop, a quarter of the
-  // video memory.
+  // Swap the procedural band for the photographic panorama once it has arrived (4K WebP,
+  // made from the 8K original: plenty for a backdrop, decoded off the main thread).
   let photo: THREE.Texture | null = null;
   void (async () => {
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}textures/sky/milky_way_8k.jpg`);
+      const res = await fetch(`${import.meta.env.BASE_URL}textures/sky/milky_way_4k.webp`);
       if (!res.ok) return;
       const bitmap = await createImageBitmap(await res.blob(), { resizeWidth: 4096, resizeHeight: 2048, resizeQuality: 'high', imageOrientation: 'flipY' });
       photo = new THREE.Texture(bitmap as unknown as HTMLImageElement);

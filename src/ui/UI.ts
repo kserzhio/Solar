@@ -31,6 +31,10 @@ export interface UIHandlers {
   onDrift(): void;
   /** Gargantua: show the hole as in the film or as in nature. */
   onHoleLook(look: 'film' | 'physics'): void;
+  /** Photo mode on or off. */
+  onPhoto(): void;
+  /** Save the frame on screen as a picture. */
+  onSaveFrame(): void;
 }
 
 export interface Tick {
@@ -47,6 +51,7 @@ const ICON_TOUR = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" c
 const ICON_SIZES = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="13" r="5"/><circle cx="15.5" cy="14.5" r="3"/><circle cx="20.5" cy="15.5" r="1.6"/></svg>`;
 const ICON_CURIOUS = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="1.4"/><ellipse cx="12" cy="12" rx="9" ry="3.4"/><ellipse cx="12" cy="12" rx="9" ry="3.4" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="9" ry="3.4" transform="rotate(-60 12 12)"/></svg>`;
 const ICON_DRIFT = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="17" cy="7" r="2.4"/><path d="M15.2 8.8C11 13 7 12 3.5 20.5"/><path d="M14 6.2c-4 0-6.5 3-9 6.3"/><path d="M18.4 9.3c.2 4-2.5 7.2-6.2 10.4"/></svg>`;
+const ICON_PHOTO = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5h3l1.6-2.2h6.8L17 8.5h3v10H4z"/><circle cx="12" cy="13.3" r="3.4"/></svg>`;
 const ICON_RESTART = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4.5v4h4"/></svg>`;
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, html = ''): HTMLElementTagNameMap[K] {
@@ -91,7 +96,15 @@ export class UI {
   private comparePool: HTMLElement[] = [];
   private skyLayer = el('div', 'zoom-labels sky-labels');
   private skyPool: HTMLElement[] = [];
-  private photoHint = el('div', 'photo-hint', `${tr('Фото-режим')} · <kbd>P</kbd> ${tr('повернути інтерфейс')} · <kbd>C</kbd> ${tr('зберегти кадр')}`);
+  private photoHint = el(
+    'div',
+    'photo-hint',
+    `<span>${tr('Фото-режим')}</span>` +
+      `<button type="button" data-act="save">${tr('зберегти кадр')}<kbd>C</kbd></button>` +
+      `<button type="button" data-act="back">${tr('повернути інтерфейс')}<kbd>P</kbd></button>`,
+  );
+  /** Photo mode: everything hides for a clean frame (to save, too). */
+  private photoBtn = el('button', 'btn btn--keep is-hidden', `${ICON_PHOTO}<kbd>P</kbd>`);
   private history = el('div', 'history');
   private photo = false;
   private historyTl: gsap.core.Timeline | null = null;
@@ -127,6 +140,14 @@ export class UI {
     'div',
     'narrow',
     `<div class="narrow__text"><div class="narrow__title">${tr('Розширте вікно браузера')}</div><div class="narrow__sub">${tr('Всесвіт не вміщується у вікно, вужче за 1024 пікселі')}</div></div>`,
+  );
+  /** The graphics driver dropped the page's WebGL context: what happened, and a way back. */
+  private lost = el(
+    'div',
+    'narrow lost',
+    `<div class="narrow__text"><div class="narrow__title">${tr('Відеокарта перезапустилася')}</div>` +
+      `<div class="narrow__sub">${tr('Відновлюємо сцену…')}</div>` +
+      `<button type="button" class="btn lost__reload">${tr('Перезавантажити')}</button></div>`,
   );
   private promptTween?: gsap.core.Tween;
 
@@ -168,7 +189,17 @@ export class UI {
     this.langBtn.title = lang === 'uk' ? 'English' : 'Українська';
     this.langBtn.setAttribute('lang', lang === 'uk' ? 'en' : 'uk');
     this.langBtn.addEventListener('click', () => setLang(lang === 'uk' ? 'en' : 'uk'));
-    controls.append(this.soundBtn, this.skipBtn, this.driftBtn, this.compareBtn, this.tourBtn, this.curiousBtn, this.rewindBtn, this.langBtn, this.restartBtn);
+    this.photoBtn.type = 'button';
+    this.photoBtn.title = tr('Фото-режим: кадр без інтерфейсу, його можна зберегти (P)');
+    this.photoBtn.setAttribute('aria-label', tr('Фото-режим'));
+    this.photoBtn.addEventListener('click', () => handlers.onPhoto());
+    this.photoHint.querySelector('[data-act="save"]')!.addEventListener('click', () => handlers.onSaveFrame());
+    this.photoHint.querySelector('[data-act="back"]')!.addEventListener('click', () => handlers.onPhoto());
+    // In photo mode the hint (with its buttons) comes back whenever the pointer moves.
+    document.addEventListener('pointermove', () => {
+      if (this.photo) this.flashPhotoHint();
+    });
+    controls.append(this.soundBtn, this.skipBtn, this.driftBtn, this.compareBtn, this.tourBtn, this.curiousBtn, this.rewindBtn, this.photoBtn, this.langBtn, this.restartBtn);
     this.rewindBtn.addEventListener('click', () => handlers.onRewind());
     this.soundBtn.addEventListener('click', () => handlers.onSound());
     this.skipBtn.addEventListener('click', () => handlers.onSkip());
@@ -261,12 +292,14 @@ export class UI {
       this.credits,
     );
     // The flash sits under the HUD so captions stay readable through the brightest moments.
-    parent.append(this.barTop, this.barBottom, this.flashEl, this.hud, this.here, this.label, this.clock, this.photoHint, this.veilEl, this.narrow);
+    this.lost.querySelector('button')!.addEventListener('click', () => location.reload());
+    parent.append(this.barTop, this.barBottom, this.flashEl, this.hud, this.here, this.label, this.clock, this.photoHint, this.veilEl, this.narrow, this.lost);
   }
 
   // ---------------------------------------------------------------- start screen
 
   showIntro(): void {
+    this.photoBtn.classList.add('is-hidden');
     this.brand.style.opacity = '1';
     this.warning.style.opacity = '1';
     this.promptTween?.kill();
@@ -276,6 +309,7 @@ export class UI {
   }
 
   hideIntro(): void {
+    this.photoBtn.classList.remove('is-hidden');
     this.promptTween?.kill();
     gsap.to(this.prompt, { opacity: 0, duration: 0.4 });
     this.brand.style.opacity = '0';
@@ -293,6 +327,12 @@ export class UI {
 
   setNarrow(narrow: boolean): void {
     this.narrow.classList.toggle('is-visible', narrow);
+  }
+
+  /** WebGL context lost (and, after a while without it coming back, the reload button). */
+  setContextLost(lost: boolean, offerReload = false): void {
+    this.lost.classList.toggle('is-visible', lost);
+    this.lost.classList.toggle('is-stuck', offerReload);
   }
 
   // ---------------------------------------------------------------- captions
@@ -717,13 +757,17 @@ export class UI {
   setPhotoMode(on: boolean): void {
     this.photo = on;
     document.body.classList.toggle('photo-mode', on);
+    this.photoHint.classList.toggle('is-on', on);
     gsap.killTweensOf(this.photoHint);
-    if (on) {
-      gsap.fromTo(this.photoHint, { opacity: 0 }, { opacity: 1, duration: 0.5 });
-      gsap.to(this.photoHint, { opacity: 0, duration: 1, delay: 3.2 });
-    } else {
-      gsap.set(this.photoHint, { opacity: 0 });
-    }
+    if (on) this.flashPhotoHint();
+    else gsap.set(this.photoHint, { opacity: 0 });
+  }
+
+  /** Shows the photo-mode hint, then lets it fade once the pointer rests. */
+  private flashPhotoHint(): void {
+    gsap.killTweensOf(this.photoHint);
+    gsap.to(this.photoHint, { opacity: 1, duration: 0.3 });
+    gsap.to(this.photoHint, { opacity: 0, duration: 1, delay: 2.6 });
   }
 
   // ---------------------------------------------------------------- history of everything

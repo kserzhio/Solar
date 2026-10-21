@@ -68,8 +68,9 @@ export class Plasma implements SceneModule {
         vec3 ramp(float t) {
           vec3 col = mix(vec3(0.0), uRed, smoothstep(0.0, 0.3, t));
           col = mix(col, uOrange, smoothstep(0.25, 0.55, t));
-          col = mix(col, uGold, smoothstep(0.5, 0.78, t));
-          return mix(col, uWhite, smoothstep(0.75, 1.0, t));
+          col = mix(col, uGold, smoothstep(0.45, 0.72, t));
+          // White only at the very hottest, so the plasma reads gold and orange, not cream.
+          return mix(col, uWhite, smoothstep(0.86, 1.0, t));
         }
 
         void main() {
@@ -102,7 +103,8 @@ export class Plasma implements SceneModule {
           // Near wisps: dark silhouettes with hot rims in front of everything else.
           float body = smoothstep(0.05, 0.55, near);
           float rim = smoothstep(0.0, 0.12, near) * (1.0 - smoothstep(0.12, 0.3, near));
-          col *= 1.0 - body * 0.5 * clearNear;
+          // (Shadowed towards a deep red-orange rather than grey-brown: it is all still glowing.)
+          col = mix(col, col * vec3(0.9, 0.42, 0.2), body * 0.55 * clearNear);
           col += ramp(clamp(uTemp + 0.12, 0.0, 1.0)) * rim * 0.35 * clearNear;
 
           gl_FragColor = vec4(col * uIntensity * vign * 0.6, 1.0);

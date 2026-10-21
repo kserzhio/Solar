@@ -35,6 +35,9 @@ export const CURIOUS = [
   { name: 'supernova', title: 'Наднова', sub: 'Звідки в нас залізо й кисень' },
   { name: 'moon', title: 'Народження Місяця', sub: 'Зіткнення з Теєю' },
   { name: 'pulsar', title: 'Пульсар', sub: 'Нейтронна зоря-маяк' },
+  { name: 'merger', title: 'Злиття чорних дір', sub: 'Гравітаційні хвилі' },
+  { name: 'sunfuture', title: 'Майбутнє Сонця', sub: 'Червоний гігант і білий карлик' },
+  { name: 'trappist', title: 'TRAPPIST-1', sub: 'Сім планет біля червоного карлика' },
 ] as const;
 
 /** The menu's scenes, plus «Гаргантюа», reached only through the wormhole near Saturn. */

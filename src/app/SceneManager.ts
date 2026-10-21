@@ -12,6 +12,10 @@ export class SceneManager {
     this.scenes.set(scene.name, scene);
   }
 
+  has(name: SceneName): boolean {
+    return this.scenes.has(name);
+  }
+
   get<T extends SceneModule>(name: SceneName): T {
     const scene = this.scenes.get(name);
     if (!scene) throw new Error(`Unknown scene: ${name}`);
